@@ -207,6 +207,8 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-rope.cpp)
 endif()
 
+llama_build_and_test(test-profiler.cpp)
+
 # libmtmd
 set(LLAMA_TEST_NAME test-mtmd-c-api)
 llama_build_and_test(test-mtmd-c-api.c)
