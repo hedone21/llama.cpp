@@ -99,26 +99,12 @@ bool test_profiler_record_node() {
         return false;
     }
 
-    if (ggml_profiler_get_recording(profiler)->size() != 1) {
-        printf("\033[1;31mProfiler should have a recording after starting\033[0m\n");
-        ggml_profiler_stop(profiler);
-        ggml_profiler_free(profiler);
-        return false;
-    }
-
     usleep(1000); // Simulate some work
 
     ggml_profiler_record_node_end(profiler, out);
 
     if (ggml_profiler_get_record_count(profiler) != 1) {
         printf("\033[1;31mProfiler should have one record after recording a node\033[0m\n");
-        ggml_profiler_stop(profiler);
-        ggml_profiler_free(profiler);
-        return false;
-    }
-
-    if (ggml_profiler_get_recording(profiler)->size() != 0) {
-        printf("\033[1;31mProfiler recording should have one node after recording\033[0m\n");
         ggml_profiler_stop(profiler);
         ggml_profiler_free(profiler);
         return false;

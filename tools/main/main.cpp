@@ -1,6 +1,7 @@
 #include "arg.h"
 #include "common.h"
 #include "console.h"
+#include "ggml-profiler.h"
 #include "log.h"
 #include "sampling.h"
 #include "llama.h"
@@ -513,6 +514,9 @@ int main(int argc, char ** argv) {
         is_interacting = params.interactive_first;
     }
 
+    // Profiling. It should be argumented in the future.
+    ggml_profiler_start(ggml_profiler_get_instance());
+
     bool is_antiprompt        = false;
     bool input_echo           = true;
     bool display              = true;
@@ -972,6 +976,9 @@ int main(int argc, char ** argv) {
             is_interacting = true;
         }
     }
+
+    ggml_profiler_report(ggml_profiler_get_instance(), "./log");
+    ggml_profiler_stop(ggml_profiler_get_instance());
 
     if (!path_session.empty() && params.prompt_cache_all && !params.prompt_cache_ro) {
         LOG("\n%s: saving final output to session file '%s'\n", __func__, path_session.c_str());

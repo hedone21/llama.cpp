@@ -1,3 +1,4 @@
+#include "ggml-profiler.h"
 #define _CRT_SECURE_NO_DEPRECATE // Disables "unsafe" warnings on Windows
 #define _USE_MATH_DEFINES // For M_PI on MSVC
 
@@ -2842,6 +2843,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
 
     for (int node_n = 0; node_n < cgraph->n_nodes && atomic_load_explicit(&tp->abort, memory_order_relaxed) != node_n; node_n++) {
         struct ggml_tensor * node = cgraph->nodes[node_n];
+        ggml_profiler_record_node_start(ggml_profiler_get_instance(), node);
 
         ggml_compute_forward(&params, node);
 
@@ -2850,6 +2852,8 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             atomic_store_explicit(&tp->abort, node_n + 1, memory_order_relaxed);
             tp->ec    = GGML_STATUS_ABORTED;
         }
+
+        ggml_profiler_record_node_end(ggml_profiler_get_instance(), node);
 
         if (node_n + 1 < cgraph->n_nodes) {
             ggml_barrier(state->threadpool);

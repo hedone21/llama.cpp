@@ -2,12 +2,17 @@
 
 #include "ggml-backend.h"
 #include "ggml.h"
-#include <list>
-#include <vector>
+
 #ifdef  __cplusplus
 extern "C" {
 #endif
 
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stddef.h>
+
+#define GGML_PROFILER_RECORD_MAX (1024 * 1024)
+#define GGML_PROFILER_RECORDING_MAX 32
 #define GGML_PROFILER_BACKEND_DEVICE_NAME_MAX 8
 
 typedef struct ggml_profiler * ggml_profiler_t;
@@ -17,13 +22,13 @@ typedef struct ggml_profiler_tensor_info * ggml_profiler_tensor_info_t;
 struct ggml_profiler_tensor_info {
     // Tensor information
     const char * name; // tensor name
-    ggml_type type; // tensor type
-    ggml_op op; // tensor operation
+    enum ggml_type type; // tensor type
+    enum ggml_op op; // tensor operation
 
     int64_t ne[GGML_MAX_DIMS]; // tensor dimensions
     size_t nbytes; // number of bytes in the tensor
     int64_t n_src; // number of source tensors
-    struct ggml_profiler_tensor_info * src[GGML_MAX_SRC]; // source tensors info
+    ggml_profiler_tensor_info_t src[GGML_MAX_SRC]; // source tensors info
 
     // Profiling information
     char backend[GGML_PROFILER_BACKEND_DEVICE_NAME_MAX]; // backend device name
@@ -41,7 +46,7 @@ void ggml_profiler_tensor_info_free(ggml_profiler_tensor_info_t info);
 
 // Set the backend device name for the tensor info
 inline void ggml_profiler_tensor_info_set_backend(ggml_profiler_tensor_info_t info, const char * backend) {
-    if (info == nullptr || backend == nullptr) {
+    if (info == NULL || backend == NULL) {
         return; // If info or backend is null, do nothing
     }
     snprintf(info->backend, sizeof(info->backend), "%s", backend); // Set the backend device name
@@ -49,7 +54,7 @@ inline void ggml_profiler_tensor_info_set_backend(ggml_profiler_tensor_info_t in
 
 // Get tensor compuation time in microseconds
 inline int64_t ggml_profiler_tensor_info_get_time(const ggml_profiler_tensor_info_t info) {
-    if (info == nullptr || info->end_time <= info->start_time) {
+    if (info == NULL || info->end_time <= info->start_time) {
         return 0; // Return 0 if info is null or end time is not greater than start time
     }
     return info->end_time - info->start_time; // Return the computation time in microseconds
@@ -58,8 +63,10 @@ inline int64_t ggml_profiler_tensor_info_get_time(const ggml_profiler_tensor_inf
 struct ggml_profiler {
     bool on_started; // true if profiling is started
 
-    std::vector<ggml_profiler_tensor_info_t> tensors; // list of tensors being profiled
-    std::list<ggml_profiler_tensor_info_t> recording; // list of recording tensors
+    ggml_profiler_tensor_info_t tensors[GGML_PROFILER_RECORD_MAX]; // list of tensors being profiled
+    size_t n_tensors; // number of tensors being profiled
+    ggml_profiler_tensor_info_t recording[GGML_PROFILER_RECORDING_MAX]; // list of recording tensors
+    size_t n_recording; // number of recording tensors
 };
 
 // Function to create a new profiler instance
@@ -75,7 +82,7 @@ void ggml_profiler_start(ggml_profiler_t profiler);
 void ggml_profiler_stop(ggml_profiler_t profiler);
 // Check if the profiler is started
 inline bool ggml_profiler_is_active(ggml_profiler_t profiler) {
-    return profiler != nullptr && profiler->on_started;
+    return profiler != NULL && profiler->on_started;
 }
 
 // Record node(tensor) computation start
@@ -85,20 +92,16 @@ void ggml_profiler_record_node_end(ggml_profiler_t profiler, const struct ggml_t
 
 // Report profiling information
 // If path is not null, save the report to the file at the specified path.
-void ggml_profiler_report(ggml_profiler_t profiler, const char * path = nullptr);
+void ggml_profiler_report(ggml_profiler_t profiler, const char * path);
 
 // Get recoreded tensor info count
-inline size_t ggml_profiler_get_record_count(ggml_profiler_t profiler) {
-    return profiler != nullptr ? profiler->tensors.size() : 0;
-}
+size_t ggml_profiler_get_record_count(ggml_profiler_t profiler);
 
 // Get recording tensor infos
-inline const std::list<ggml_profiler_tensor_info_t>* ggml_profiler_get_recording(ggml_profiler_t profiler) {
-    return profiler != nullptr ? &profiler->recording : nullptr;
-}
+const ggml_profiler_tensor_info_t* ggml_profiler_get_recording(ggml_profiler_t profiler);
 
 static bool ggml_profiler_init(ggml_profiler_t profiler) {
-    if (profiler == nullptr) {
+    if (profiler == NULL) {
         return false;
     }
     profiler->on_started = false;
@@ -106,7 +109,21 @@ static bool ggml_profiler_init(ggml_profiler_t profiler) {
 }
 
 static void ggml_profiler_free(ggml_profiler_t profiler) {
-    delete profiler;
+    if (profiler == NULL) {
+        return; // If profiler is null, do nothing
+    }
+
+    // Free all recorded tensor infos
+    for (size_t i = 0; i < profiler->n_tensors; i++) {
+        ggml_profiler_tensor_info_free(profiler->tensors[i]);
+    }
+
+    // Free all recording tensor infos
+    for (size_t i = 0; i < profiler->n_recording; i++) {
+        ggml_profiler_tensor_info_free(profiler->recording[i]);
+    }
+
+    free(profiler); // Free the profiler instance
 }
 
 #ifdef  __cplusplus
