@@ -977,7 +977,7 @@ int main(int argc, char ** argv) {
         }
     }
 
-    ggml_profiler_report(ggml_profiler_get_instance(), "./log");
+    ggml_profiler_report(ggml_profiler_get_instance(), "./profile.json");
     ggml_profiler_stop(ggml_profiler_get_instance());
 
     if (!path_session.empty() && params.prompt_cache_all && !params.prompt_cache_ro) {

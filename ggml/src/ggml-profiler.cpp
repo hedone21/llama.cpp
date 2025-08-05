@@ -175,7 +175,7 @@ void ggml_profiler_report(ggml_profiler_t profiler, const char * path) {
             continue; // Skip null tensor infos
         }
         int64_t time = ggml_profiler_tensor_info_get_time(tensor_info);
-        GGML_LOG_INFO("Tensor: %s, Type: %s, Op: %s, Shape: [%d, %d, %d, %d], Time: %lld us, Memory: %zu bytes",
+        GGML_LOG_INFO("Tensor: %s, Type: %s, Op: %s, Shape: [%d, %d, %d, %d], Time: %lld us, Memory: %zu bytes\n",
                       tensor_info->name, ggml_type_name(tensor_info->type), ggml_op_name(tensor_info->op),
                       tensor_info->ne[0], tensor_info->ne[1], tensor_info->ne[2], tensor_info->ne[3],
                       time, tensor_info->nbytes);
@@ -189,17 +189,37 @@ void ggml_profiler_report(ggml_profiler_t profiler, const char * path) {
             return; // If file opening fails, do nothing
         }
 
+        fprintf(file, "[\n");
+
+        bool first = true;
         for (const auto & tensor_info : profiler->tensors) {
             if (tensor_info == NULL) {
                 continue; // Skip null tensor infos
             }
             int64_t time = ggml_profiler_tensor_info_get_time(tensor_info);
-            fprintf(file, "[%lld] Tensor: %s, Type: %s, Op: %s, Shape: [%d, %d, %d, %d], Time: %lld us, Memory: %zu bytes\n",
-                    tensor_info->start_time,
-                    tensor_info->name, ggml_type_name(tensor_info->type), ggml_op_name(tensor_info->op),
-                    tensor_info->ne[0], tensor_info->ne[1], tensor_info->ne[2], tensor_info->ne[3],
-                    time, tensor_info->nbytes);
+            if (!first) {
+                fprintf(file, ",\n");
+            }
+            first = false;
+            fprintf(file, "  {\n");
+            fprintf(file, "    \"name\": \"%s\",\n", tensor_info->name);
+            fprintf(file, "    \"type\": \"%s\",\n", ggml_type_name(tensor_info->type));
+            fprintf(file, "    \"op\": \"%s\",\n", ggml_op_name(tensor_info->op));
+            fprintf(file, "    \"shape\": [%ld, %ld, %ld, %ld],\n",
+                    tensor_info->ne[0], tensor_info->ne[1], tensor_info->ne[2], tensor_info->ne[3]);
+            fprintf(file, "    \"start_at\": %lu,\n", tensor_info->start_time);
+            fprintf(file, "    \"time\": %lu,\n", time);
+            fprintf(file, "    \"memory\": %zu\n", tensor_info->nbytes);
+            fprintf(file, "  }");
+
+            // fprintf(file, "[%lld] Tensor: %s, Type: %s, Op: %s, Shape: [%d, %d, %d, %d], Time: %lld us, Memory: %zu bytes\n",
+            //         tensor_info->start_time,
+            //         tensor_info->name, ggml_type_name(tensor_info->type), ggml_op_name(tensor_info->op),
+            //         tensor_info->ne[0], tensor_info->ne[1], tensor_info->ne[2], tensor_info->ne[3],
+            //         time, tensor_info->nbytes);
         }
+
+        fprintf(file, "\n]\n");
 
         fclose(file);
     }
