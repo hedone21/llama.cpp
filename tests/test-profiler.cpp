@@ -90,7 +90,7 @@ bool test_profiler_record_node() {
     ggml_profiler_start(profiler);
 
     // Record a node
-    ggml_profiler_record_node_start(profiler, out);
+    ggml_profiler_record_node_start(profiler, out, "test_backend");
 
     if (ggml_profiler_get_record_count(profiler) != 0) {
         printf("\033[1;31mProfiler should have no records before recording a node\033[0m\n");
@@ -135,7 +135,7 @@ bool test_profiler_parse_tensor() {
 
     ggml_tensor * out = build_graph(ctx);
 
-    auto info = ggml_profiler_tensor_info_new(out);
+    auto info = ggml_profiler_tensor_info_new(out, "test_backend");
     if (strcmp(info->name, out->name) != 0) {
         printf("\033[1;31mTensor name mismatch: expected %s, got %s\033[0m\n", out->name, info->name);
         ggml_profiler_tensor_info_free(info);

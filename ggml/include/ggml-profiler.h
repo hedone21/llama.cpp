@@ -31,7 +31,7 @@ struct ggml_profiler_tensor_info {
     ggml_profiler_tensor_info_t src[GGML_MAX_SRC]; // source tensors info
 
     // Profiling information
-    char backend[GGML_PROFILER_BACKEND_DEVICE_NAME_MAX]; // backend device name
+    const char * backend; // backend device name
     int64_t start_time; // start time of the tensor computation
     int64_t end_time; // end time of the tensor computation
     size_t memory_usage; // memory usage during the tensor computation
@@ -43,18 +43,10 @@ struct ggml_profiler_tensor_info {
 };
 
 // Create a new tensor info instance from a ggml tensor
-ggml_profiler_tensor_info_t ggml_profiler_tensor_info_new(const struct ggml_tensor * tensor);
+ggml_profiler_tensor_info_t ggml_profiler_tensor_info_new(const struct ggml_tensor * tensor, const char * backend);
 
 // Free the tensor info instance
 void ggml_profiler_tensor_info_free(ggml_profiler_tensor_info_t info);
-
-// Set the backend device name for the tensor info
-inline void ggml_profiler_tensor_info_set_backend(ggml_profiler_tensor_info_t info, const char * backend) {
-    if (info == NULL || backend == NULL) {
-        return; // If info or backend is null, do nothing
-    }
-    snprintf(info->backend, sizeof(info->backend), "%s", backend); // Set the backend device name
-}
 
 // Get tensor compuation time in microseconds
 inline int64_t ggml_profiler_tensor_info_get_time(const ggml_profiler_tensor_info_t info) {
@@ -90,7 +82,7 @@ inline bool ggml_profiler_is_active(ggml_profiler_t profiler) {
 }
 
 // Record node(tensor) computation start
-void ggml_profiler_record_node_start(ggml_profiler_t profiler, const struct ggml_tensor * tensor);
+void ggml_profiler_record_node_start(ggml_profiler_t profiler, const struct ggml_tensor * tensor, const char * backend);
 // Record node(tensor) computation end
 void ggml_profiler_record_node_end(ggml_profiler_t profiler, const struct ggml_tensor * tensor);
 

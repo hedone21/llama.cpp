@@ -20,7 +20,7 @@ static int64_t get_current_time() {
     ).count();
 }
 
-ggml_profiler_tensor_info_t ggml_profiler_tensor_info_new(const struct ggml_tensor * tensor) {
+ggml_profiler_tensor_info_t ggml_profiler_tensor_info_new(const struct ggml_tensor * tensor, const char * backend) {
     if (tensor == NULL) {
         GGML_LOG_ERROR("Tensor is null");
         return NULL; // Return NULL if tensor is null
@@ -31,6 +31,7 @@ ggml_profiler_tensor_info_t ggml_profiler_tensor_info_new(const struct ggml_tens
     info->name = tensor->name;
     info->type = tensor->type;
     info->op = tensor->op;
+    info->backend = backend;
 
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
         info->ne[i] = tensor->ne[i];
@@ -45,7 +46,6 @@ ggml_profiler_tensor_info_t ggml_profiler_tensor_info_new(const struct ggml_tens
     }
 
     // Initialize profiling information
-    snprintf(info->backend, sizeof(info->backend), "-");
     info->start_time = get_current_time();
     info->end_time = 0;
     info->memory_usage = 0;
@@ -111,12 +111,12 @@ void ggml_profiler_stop(ggml_profiler_t profiler) {
     profiler->on_started = false;
 }
 
-void ggml_profiler_record_node_start(ggml_profiler_t profiler, const struct ggml_tensor * tensor) {
+void ggml_profiler_record_node_start(ggml_profiler_t profiler, const struct ggml_tensor * tensor, const char * backend) {
     if (!ggml_profiler_is_active(profiler)) {
         return; // If profiling is not active, do nothing
     }
 
-    auto info = ggml_profiler_tensor_info_new(tensor);
+    auto info = ggml_profiler_tensor_info_new(tensor, backend);
     if (info == NULL) {
         GGML_LOG_ERROR("Failed to create tensor info for %s", tensor->name);
         return; // If tensor info creation fails, do nothing
@@ -216,6 +216,7 @@ void ggml_profiler_report(ggml_profiler_t profiler, const char * path) {
             fprintf(file, "    \"name\": \"%s\",\n", tensor_info->name);
             fprintf(file, "    \"type\": \"%s\",\n", ggml_type_name(tensor_info->type));
             fprintf(file, "    \"op\": \"%s\",\n", ggml_op_name(tensor_info->op));
+            fprintf(file, "    \"backend\": \"%s\",\n", tensor_info->backend);
             fprintf(file, "    \"shape\": [%ld, %ld, %ld, %ld],\n",
                     tensor_info->ne[0], tensor_info->ne[1], tensor_info->ne[2], tensor_info->ne[3]);
             fprintf(file, "    \"start_at\": %lu,\n", tensor_info->start_time);
