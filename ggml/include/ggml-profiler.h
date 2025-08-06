@@ -11,7 +11,7 @@ extern "C" {
 #include <stdlib.h>
 #include <stddef.h>
 
-#define GGML_PROFILER_RECORD_MAX (1024 * 1024)
+#define GGML_PROFILER_RECORD_MAX (1024 * 1024 * 16)
 #define GGML_PROFILER_RECORDING_MAX 32
 #define GGML_PROFILER_BACKEND_DEVICE_NAME_MAX 8
 
