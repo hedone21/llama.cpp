@@ -12,6 +12,7 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 #include "ggml.h"
+#include "ggml-profiler.h"
 
 #include <CL/cl.h>
 
@@ -2335,12 +2336,16 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         }
 
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
+            ggml_profiler_record_node_start(ggml_profiler_get_instance(), node);
             ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
+            ggml_profiler_record_node_end(ggml_profiler_get_instance(), node);
             i++;
             continue;
         }
 
+        ggml_profiler_record_node_start(ggml_profiler_get_instance(), node);
         bool ok = ggml_cl_compute_forward(backend, node);
+        ggml_profiler_record_node_end(ggml_profiler_get_instance(), node);
         if (!ok) {
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
         }
