@@ -1,5 +1,6 @@
 #include "ggml-impl.h"
 #include <ggml-profiler.h>
+#include <sched.h>
 #include <chrono>
 #include <string>
 
@@ -49,6 +50,12 @@ ggml_profiler_tensor_info_t ggml_profiler_tensor_info_new(const struct ggml_tens
     info->end_time = 0;
     info->memory_usage = 0;
     info->io_usage = 0;
+
+    info->start_core = -1; // Default to -1 if not set
+    info->end_core = -1; // Default to -1 if not set
+    info->core_changed = false;
+
+    info->start_core = sched_getcpu(); // Get the current CPU core
 
     return info;
 }
@@ -123,12 +130,12 @@ void ggml_profiler_record_node_start(ggml_profiler_t profiler, const struct ggml
         }
     }
 
-    GGML_LOG_DEBUG("Node start: %s\n", get_tensor_info(info).c_str());
-    for (int i = 0; i < GGML_MAX_SRC; i++) {
-        if (info->src[i] != NULL) {
-            GGML_LOG_DEBUG("  Source[%d]: %s\n", i, get_tensor_info(info->src[i]).c_str());
-        }
-    }
+    // GGML_LOG_DEBUG("Node start: %s\n", get_tensor_info(info).c_str());
+    // for (int i = 0; i < GGML_MAX_SRC; i++) {
+    //     if (info->src[i] != NULL) {
+    //         GGML_LOG_DEBUG("  Source[%d]: %s\n", i, get_tensor_info(info->src[i]).c_str());
+    //     }
+    // }
 }
 
 void ggml_profiler_record_node_end(ggml_profiler_t profiler, const struct ggml_tensor * tensor) {
@@ -152,6 +159,10 @@ void ggml_profiler_record_node_end(ggml_profiler_t profiler, const struct ggml_t
         if (it && it->name == tensor->name) {
             // Update the end time and other profiling information
             it->end_time = get_current_time();
+            it->end_core = sched_getcpu(); // Get the current CPU core
+            if (it->start_core != it->end_core) {
+                it->core_changed = true; // Mark that the core has changed
+            }
             profiler->tensors[profiler->n_tensors++] = it; // Add to the main tensor list
             profiler->recording[pos] = NULL; // Clear the recording slot
             profiler->n_recording--; // Decrease the recording count
@@ -208,8 +219,12 @@ void ggml_profiler_report(ggml_profiler_t profiler, const char * path) {
             fprintf(file, "    \"shape\": [%ld, %ld, %ld, %ld],\n",
                     tensor_info->ne[0], tensor_info->ne[1], tensor_info->ne[2], tensor_info->ne[3]);
             fprintf(file, "    \"start_at\": %lu,\n", tensor_info->start_time);
-            fprintf(file, "    \"time\": %lu,\n", time);
-            fprintf(file, "    \"memory\": %zu\n", tensor_info->nbytes);
+            fprintf(file, "    \"duration\": %lu,\n", time);
+            fprintf(file, "    \"memory\": %zu,\n", tensor_info->nbytes);
+            fprintf(file, "    \"start_core\": %d,\n", tensor_info->start_core);
+            fprintf(file, "    \"end_core\": %d,\n", tensor_info->end_core);
+            fprintf(file, "    \"core_changed\": %s\n",
+                    tensor_info->core_changed ? "true" : "false");
             fprintf(file, "  }");
 
             // fprintf(file, "[%lld] Tensor: %s, Type: %s, Op: %s, Shape: [%d, %d, %d, %d], Time: %lld us, Memory: %zu bytes\n",

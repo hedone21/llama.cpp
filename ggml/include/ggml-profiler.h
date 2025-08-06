@@ -36,6 +36,10 @@ struct ggml_profiler_tensor_info {
     int64_t end_time; // end time of the tensor computation
     size_t memory_usage; // memory usage during the tensor computation
     size_t io_usage; // I/O usage during the tensor computation
+
+    int start_core; // start core for the tensor computation
+    int end_core; // end core for the tensor computation. To check if the tensor is computed on multiple cores
+    bool core_changed; // true if the core changed during the tensor computation
 };
 
 // Create a new tensor info instance from a ggml tensor
