@@ -714,6 +714,12 @@ static char causes[GGML_DEFAULT_GRAPH_SIZE*16 + GGML_SCHED_MAX_SPLITS_DEBUG*GGML
 
 // returns the backend that should be used for the node based on the current locations
 static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, struct ggml_tensor * tensor) {
+    // NOTE: If needed, custom rules for specific ops can be added here
+    // if (strncmp(tensor->name, "ffn", 3) == 0) {
+    //     SET_CAUSE(tensor, "0.name");
+    //     return 0;
+    // }
+
     // assign pre-allocated nodes to their backend
     int cur_backend_id = ggml_backend_sched_backend_from_buffer(sched, tensor, tensor);
     if (cur_backend_id != -1) {
@@ -1101,7 +1107,8 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
             assert(node_backend_id != -1); // all nodes should be assigned by now, this can happen if there is no CPU fallback
 
             // check if we should start a new split based on the sources of the current node
-            bool need_new_split = false;
+            // NOTE: Always start a new split for every nodes.
+            bool need_new_split = true;
             if (node_backend_id == cur_backend_id && split->n_inputs > 0) {
                 for (int j = 0; j < GGML_MAX_SRC; j++) {
                     struct ggml_tensor * src = node->src[j];
