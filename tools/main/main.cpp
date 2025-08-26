@@ -514,8 +514,9 @@ int main(int argc, char ** argv) {
         is_interacting = params.interactive_first;
     }
 
+    // NOTE: Remove comments to enable profiling
     // Profiling. It should be argumented in the future.
-    ggml_profiler_start(ggml_profiler_get_instance());
+    // ggml_profiler_start(ggml_profiler_get_instance());
 
     bool is_antiprompt        = false;
     bool input_echo           = true;
@@ -977,8 +978,9 @@ int main(int argc, char ** argv) {
         }
     }
 
-    ggml_profiler_report(ggml_profiler_get_instance(), "./profile.json");
-    ggml_profiler_stop(ggml_profiler_get_instance());
+    // NOTE: Remove comments to enable profiling
+    // ggml_profiler_report(ggml_profiler_get_instance(), "./profile.json");
+    // ggml_profiler_stop(ggml_profiler_get_instance());
 
     if (!path_session.empty() && params.prompt_cache_all && !params.prompt_cache_ro) {
         LOG("\n%s: saving final output to session file '%s'\n", __func__, path_session.c_str());
