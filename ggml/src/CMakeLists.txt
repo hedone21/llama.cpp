@@ -204,6 +204,7 @@ add_library(ggml-base
             ggml-quants.c
             ggml-quants.h
             ggml-profiler.cpp
+            ggml-shared-mem.cpp
             gguf.cpp)
 
 target_include_directories(ggml-base PRIVATE .)
