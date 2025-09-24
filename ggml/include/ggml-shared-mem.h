@@ -39,8 +39,8 @@ struct ggml_shared_mem_pool_private;
 struct ggml_shared_mem_pool {
     struct ggml_shared_mem_pool_private* priv;
 
-    ggml_shared_mem_t (*get)(ggml_shared_mem_pool_t pool);
-    void (*put)(ggml_shared_mem_pool_t pool, ggml_shared_mem_t shared_mem);
+    ggml_shared_mem_t (*get)(ggml_shared_mem_pool_t pool, void* key);
+    void (*put)(ggml_shared_mem_pool_t pool, void* key, ggml_shared_mem_t shared_mem);
     void (*free)(ggml_shared_mem_pool_t pool);
 };
 
