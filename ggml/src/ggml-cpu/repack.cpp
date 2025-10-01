@@ -1464,7 +1464,7 @@ static enum ggml_status ggml_backend_cpu_repack_buffer_init_tensor(ggml_backend_
     return GGML_STATUS_SUCCESS;
 }
 
-static void ggml_backend_cpu_repack_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor,
+static void ggml_backend_cpu_repack_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, struct ggml_tensor * src,
                                                        const void * data, size_t offset, size_t size) {
     GGML_ASSERT(offset == 0);
     GGML_ASSERT(size == ggml_nbytes(tensor));

@@ -17,6 +17,9 @@ extern "C" {
 typedef struct ggml_shared_mem* ggml_shared_mem_t;
 typedef struct ggml_shared_mem_pool* ggml_shared_mem_pool_t;
 
+extern cl_context GGML_SHARED_CL_CONTEXT;
+extern cl_command_queue GGML_SHARED_CL_QUEUE;
+
 struct ggml_shared_mem_private;
 struct ggml_shared_mem {
     // shared_memory fd

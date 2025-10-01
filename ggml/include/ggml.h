@@ -173,6 +173,7 @@
 //
 //
 
+#include "ggml-shared-mem.h"
 #ifdef GGML_SHARED
 #    if defined(_WIN32) && !defined(__MINGW32__)
 #        ifdef GGML_BUILD
@@ -625,7 +626,8 @@ extern "C" {
 
         void * extra; // extra things e.g. for ggml-cuda.cu
 
-        char padding[8];
+        ggml_shared_mem_t shared;
+        // char padding[8];
     };
 
     static const size_t GGML_TENSOR_SIZE = sizeof(struct ggml_tensor);

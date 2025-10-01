@@ -47,8 +47,8 @@ extern "C" {
         enum ggml_status (*init_tensor)(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor);
         // tensor data access
         void         (*memset_tensor)(ggml_backend_buffer_t buffer,       struct ggml_tensor * tensor,     uint8_t value, size_t offset, size_t size);
-        void         (*set_tensor)   (ggml_backend_buffer_t buffer,       struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
-        void         (*get_tensor)   (ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor,       void * data, size_t offset, size_t size);
+        void         (*set_tensor)   (ggml_backend_buffer_t buffer,       struct ggml_tensor * tensor, struct ggml_tensor  * src, const void * data, size_t offset, size_t size);
+        void         (*get_tensor)   (ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, struct ggml_tensor  * dest,      void * data, size_t offset, size_t size);
         // (optional) tensor copy: dst is in the buffer, src may be in any buffer, including buffers from a different backend (return false if not supported)
         bool         (*cpy_tensor)   (ggml_backend_buffer_t buffer, const struct ggml_tensor * src, struct ggml_tensor * dst);
         // clear the entire buffer

@@ -15,6 +15,9 @@
 #define CL_MEM_EXT_HOST_PTR_QCOM                   (1 << 29)
 #define LOAD_FACTOR_THRESHOLD 0.75 // 크기 조절을 결정하는 임계값
 
+cl_context GGML_SHARED_CL_CONTEXT = NULL;
+cl_command_queue GGML_SHARED_CL_QUEUE = NULL;
+
 // 해시맵의 각 항목(슬롯)을 나타내는 구조체
 typedef struct {
     void* key;                 // 키 (포인터 주소)
@@ -168,7 +171,7 @@ int ggml_shared_mem_alloc(ggml_shared_mem_t shared_mem, size_t size) {
     shared_mem->fd = mem_fd;
     shared_mem->mem_size = size;
 
-    GGML_LOG_ERROR("[MYGO] %s: creating buffer with size %zu\n", __func__, shared_mem->mem_size);
+    // GGML_LOG_ERROR("[MYGO] %s: creating buffer with size %zu\n", __func__, shared_mem->mem_size);
 
     return 0;
 }
@@ -196,16 +199,20 @@ int ggml_shared_mem_alloc_cl(ggml_shared_mem_t shared_mem, cl_context context, s
     host_ptr.ion_hostptr = shared_mem->mem;
     host_ptr.ion_filedesc = shared_mem->fd;
 
-    GGML_LOG_ERROR("[MYGO] %s: creating cl buffer with size %zu\n", __func__, shared_mem->mem_size);
+    // GGML_LOG_ERROR("[MYGO] %s: creating cl buffer with size %zu\n", __func__, shared_mem->mem_size);
 
-    cl_mem mem = clCreateBuffer(context, CL_MEM_USE_HOST_PTR | CL_MEM_EXT_HOST_PTR_QCOM,
-                                shared_mem->mem_size, &host_ptr, &err);
+    // cl_mem mem = clCreateBuffer(context, CL_MEM_USE_HOST_PTR | CL_MEM_EXT_HOST_PTR_QCOM,
+    //                             shared_mem->mem_size, &host_ptr, &err);
+    cl_mem mem = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR | CL_MEM_READ_WRITE,
+                                shared_mem->mem_size, NULL, &err);
     if (err != CL_SUCCESS) {
         GGML_LOG_ERROR("[MYGO] %s: clCreateBuffer failed with error %d\n", __func__, err);
         return -1;
     }
 
     shared_mem->cmem = mem;
+    shared_mem->mem = clEnqueueMapBuffer(GGML_SHARED_CL_QUEUE, mem, CL_FALSE, CL_MAP_READ | CL_MAP_WRITE, 0,
+        size, 0, NULL, NULL, &err);
 
     return 0;
 }

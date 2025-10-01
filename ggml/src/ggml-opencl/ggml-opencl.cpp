@@ -1,3 +1,4 @@
+#include "ggml-shared-mem.h"
 #define CL_TARGET_OPENCL_VERSION GGML_OPENCL_TARGET_VERSION
 #define CL_USE_DEPRECATED_OPENCL_1_2_APIS
 
@@ -2715,9 +2716,24 @@ static enum ggml_status ggml_backend_opencl_buffer_init_tensor(ggml_backend_buff
         {
             size_t offset = (char *) tensor->data - (char *) ggml_backend_opencl_buffer_get_base(buffer);
 
+            if (tensor->shared == NULL) {
+                ggml_shared_mem_t mem = ggml_shared_mem_new();
+                mem->alloc(mem, ggml_nbytes(tensor));
+                tensor->shared = mem;
+            }
+
+            if (tensor->shared->cmem == NULL) {
+                ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
+
+                cl_context context = backend_ctx->context;
+                tensor->shared->alloc_cl(tensor->shared, context, ggml_nbytes(tensor));
+            }
+
             ggml_tensor_extra_cl * extra = ctx->ggml_opencl_alloc_temp_tensor_extra();
-            extra->offset = offset;
-            extra->data_device = ctx->buffer[0];
+            // extra->offset = offset;
+            // extra->data_device = ctx->buffer[0];
+            extra->offset = 0;
+            extra->data_device = tensor->shared->cmem;
             extra->actual_size = ggml_nbytes(tensor);
 
             tensor->extra = extra;
@@ -2740,7 +2756,7 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
             tensor->ne[2] == 1 && tensor->ne[3] == 1;
 }
 
-static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, ggml_tensor * src, const void * data, size_t offset, size_t size) {
     ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
 
     cl_context context = backend_ctx->context;
@@ -2993,14 +3009,23 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     ggml_tensor_extra_cl * extra = (ggml_tensor_extra_cl *) tensor->extra;
     GGML_ASSERT(extra);
 
-    CL_CHECK(clEnqueueWriteBuffer(
-        queue, extra->data_device, CL_TRUE, extra->offset + offset,
-        size, data, 0, NULL, NULL));
+    if (src && src->shared && src->shared->cmem) {
+        extra->data_device = src->shared->cmem;
+
+        // clEnqueueUnmapMemObject(GGML_SHARED_CL_QUEUE, src->shared->cmem, src->data, 0, NULL, NULL);
+        // CL_CHECK(clEnqueueWriteBuffer(
+        //     queue, extra->data_device, CL_TRUE, extra->offset + offset,
+        //     size, data, 0, NULL, NULL));
+    }else {
+        CL_CHECK(clEnqueueWriteBuffer(
+            queue, extra->data_device, CL_FALSE, extra->offset + offset,
+            size, data, 0, NULL, NULL));
+    }
 
     GGML_UNUSED(buffer);
 }
 
-static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, ggml_tensor * dest, void * data, size_t offset, size_t size) {
     GGML_ASSERT(tensor->extra);
 
     ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
@@ -3048,9 +3073,20 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
 
     ggml_tensor_extra_cl * extra = (ggml_tensor_extra_cl *) tensor->extra;
 
-    CL_CHECK(clEnqueueReadBuffer(
-        queue, extra->data_device, CL_TRUE, extra->offset + tensor->view_offs + offset,
-        size, data, 0, NULL, NULL));
+    if (dest && dest->shared && dest->shared->cmem) {
+        // extra->data_device = dest->shared->cmem;
+        dest->shared->cmem = extra->data_device;
+
+        // CL_CHECK(clEnqueueReadBuffer(
+        //     queue, extra->data_device, CL_TRUE, extra->offset + tensor->view_offs + offset,
+        //     size, data, 0, NULL, NULL));
+        dest->data = clEnqueueMapBuffer(GGML_SHARED_CL_QUEUE, dest->shared->cmem, CL_FALSE, CL_MAP_READ | CL_MAP_WRITE, 0,
+                                             size, 0, NULL, NULL, NULL);
+    }else {
+        CL_CHECK(clEnqueueReadBuffer(
+            queue, extra->data_device, CL_TRUE, extra->offset + tensor->view_offs + offset,
+            size, data, 0, NULL, NULL));
+    }
 
     GGML_UNUSED(buffer);
 }
@@ -3096,6 +3132,8 @@ static const char * ggml_backend_opencl_buffer_type_get_name(ggml_backend_buffer
 
 static ggml_backend_buffer_t ggml_backend_opencl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
     ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer_type->device);
+    GGML_SHARED_CL_CONTEXT = backend_ctx->context;
+    GGML_SHARED_CL_QUEUE   = backend_ctx->queue;
 
     // clCreateBuffer returns -61 for size 0
     size = std::max(size, (size_t)1);
@@ -3135,7 +3173,7 @@ static bool ggml_backend_opencl_buffer_type_supports_backend(ggml_backend_buffer
 static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
     /* .get_name         = */ ggml_backend_opencl_buffer_type_get_name,
     /* .alloc_buffer     = */ ggml_backend_opencl_buffer_type_alloc_buffer,
-    /* .get_alignment    = */ ggml_backend_opencl_buffer_type_get_alignment,
+    /* tget_alignment    = */ ggml_backend_opencl_buffer_type_get_alignment,
     /* .get_max_size     = */ ggml_backend_opencl_buffer_type_get_max_size,
     /* .get_alloc_size   = */ NULL,
     /* .is_host          = */ NULL,
