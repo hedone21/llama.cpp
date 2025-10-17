@@ -748,6 +748,12 @@ extern "C" {
             int    n_dims,
             const int64_t *ne);
 
+    GGML_API struct ggml_tensor * ggml_copy_tensor(
+            struct ggml_context * ctx,
+            enum   ggml_type type,
+            int    n_dims,
+            const int64_t *ne);
+
     GGML_API struct ggml_tensor * ggml_new_tensor_1d(
             struct ggml_context * ctx,
             enum   ggml_type type,

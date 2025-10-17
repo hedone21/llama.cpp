@@ -1,3 +1,4 @@
+#include "ggml-shared-mem.h"
 #define _CRT_SECURE_NO_DEPRECATE // Disables "unsafe" warnings on Windows
 #define _USE_MATH_DEFINES // For M_PI on MSVC
 
@@ -1615,7 +1616,8 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         int                   n_dims,
         const int64_t       * ne,
         struct ggml_tensor  * view_src,
-        size_t                view_offs) {
+        size_t                view_offs,
+        bool   is_shared) {
 
     GGML_ASSERT(type >= 0 && type < GGML_TYPE_COUNT);
     GGML_ASSERT(n_dims >= 1 && n_dims <= GGML_MAX_DIMS);
@@ -1650,6 +1652,22 @@ static struct ggml_tensor * ggml_new_tensor_impl(
 
     struct ggml_tensor * const result = (struct ggml_tensor *)((char *)ctx->mem_buffer + obj_new->offs);
 
+    void * tensor_data = obj_alloc_size > 0 ? (void *)(result + 1) : data;
+    ggml_shared_mem_t shm = NULL;
+
+    if (is_shared) {
+        shm = ggml_shared_mem_new();
+        if (!shm) {
+            GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
+            return NULL;
+        }
+        shm->alloc(shm, data_size);
+        if (GGML_SHARED_CL_CONTEXT) {
+            shm->alloc_cl(shm, GGML_SHARED_CL_CONTEXT, data_size);
+        }
+        tensor_data = shm->mem;
+    }
+
     *result = (struct ggml_tensor) {
         /*.type         =*/ type,
         /*.buffer       =*/ NULL,
@@ -1661,10 +1679,10 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         /*.src          =*/ { NULL },
         /*.view_src     =*/ view_src,
         /*.view_offs    =*/ view_offs,
-        /*.data         =*/ obj_alloc_size > 0 ? (void *)(result + 1) : data,
+        /*.data         =*/ tensor_data,
         /*.name         =*/ { 0 },
         /*.extra        =*/ NULL,
-        /*.shared       =*/ NULL,
+        /*.shared       =*/ shm,
     };
 
     // TODO: this should not be needed as long as we don't rely on aligned SIMD loads
@@ -1690,7 +1708,15 @@ struct ggml_tensor * ggml_new_tensor(
         enum   ggml_type      type,
         int                   n_dims,
         const int64_t       * ne) {
-    return ggml_new_tensor_impl(ctx, type, n_dims, ne, NULL, 0);
+    return ggml_new_tensor_impl(ctx, type, n_dims, ne, NULL, 0, false);
+}
+
+struct ggml_tensor * ggml_copy_tensor(
+        struct ggml_context * ctx,
+        enum   ggml_type      type,
+        int                   n_dims,
+        const int64_t       * ne) {
+    return ggml_new_tensor_impl(ctx, type, n_dims, ne, NULL, 0, true);
 }
 
 struct ggml_tensor * ggml_new_tensor_1d(
@@ -1807,7 +1833,7 @@ struct ggml_tensor * ggml_format_name(struct ggml_tensor * tensor, const char * 
 struct ggml_tensor * ggml_view_tensor(
         struct ggml_context * ctx,
         struct ggml_tensor  * src) {
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, src->type, GGML_MAX_DIMS, src->ne, src, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, src->type, GGML_MAX_DIMS, src->ne, src, 0, false);
     ggml_format_name(result, "%s (view)", src->name);
 
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
@@ -2679,7 +2705,7 @@ static struct ggml_tensor * ggml_glu_impl(
     }
 
     int64_t ne[GGML_MAX_DIMS] = { a->ne[0] / 2 }; for (int i = 1; i < GGML_MAX_DIMS; i++) ne[i] = a->ne[i];
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, GGML_MAX_DIMS, b ? a->ne : ne, NULL, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, GGML_MAX_DIMS, b ? a->ne : ne, NULL, 0, false);
 
     ggml_set_op_params_i32(result, 0, (int32_t) op);
     ggml_set_op_params_i32(result, 1, (int32_t) swapped);
@@ -3314,7 +3340,7 @@ struct ggml_tensor * ggml_reshape(
     // as only the shape of b is relevant, and not its memory layout, b is allowed to be non contiguous.
     GGML_ASSERT(ggml_nelements(a) == ggml_nelements(b));
 
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, GGML_MAX_DIMS, b->ne, a, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, GGML_MAX_DIMS, b->ne, a, 0, false);
     ggml_format_name(result, "%s (reshaped)", a->name);
 
     result->op     = GGML_OP_RESHAPE;
@@ -3331,7 +3357,7 @@ struct ggml_tensor * ggml_reshape_1d(
     GGML_ASSERT(ggml_nelements(a) == ne0);
 
     const int64_t ne[1] = { ne0 };
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 1, ne, a, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 1, ne, a, 0, false);
     ggml_format_name(result, "%s (reshaped)", a->name);
 
     result->op     = GGML_OP_RESHAPE;
@@ -3349,7 +3375,7 @@ struct ggml_tensor * ggml_reshape_2d(
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1);
 
     const int64_t ne[2] = { ne0, ne1 };
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 2, ne, a, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 2, ne, a, 0, false);
     ggml_format_name(result, "%s (reshaped)", a->name);
 
     result->op     = GGML_OP_RESHAPE;
@@ -3368,7 +3394,7 @@ struct ggml_tensor * ggml_reshape_3d(
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2);
 
     const int64_t ne[3] = { ne0, ne1, ne2 };
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 3, ne, a, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 3, ne, a, 0, false);
     ggml_format_name(result, "%s (reshaped)", a->name);
 
     result->op     = GGML_OP_RESHAPE;
@@ -3388,7 +3414,7 @@ struct ggml_tensor * ggml_reshape_4d(
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2*ne3);
 
     const int64_t ne[4] = { ne0, ne1, ne2, ne3 };
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 4, ne, a, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 4, ne, a, 0, false);
     ggml_format_name(result, "%s (reshaped)", a->name);
 
     result->op     = GGML_OP_RESHAPE;
@@ -3403,7 +3429,7 @@ static struct ggml_tensor * ggml_view_impl(
         int                   n_dims,
         const int64_t       * ne,
         size_t                offset) {
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, n_dims, ne, a, offset);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, n_dims, ne, a, offset, false);
     ggml_format_name(result, "%s (view)", a->name);
 
     ggml_set_op_params(result, &offset, sizeof(offset));
