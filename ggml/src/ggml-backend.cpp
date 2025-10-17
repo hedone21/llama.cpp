@@ -611,11 +611,26 @@ void ggml_backend_multi_buffer_set_usage(ggml_backend_buffer_t buffer, enum ggml
 }
 
 // creates a copy of the tensor with the same memory layout
-static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, const struct ggml_tensor * tensor) {
-    struct ggml_tensor * dup = ggml_dup_tensor(ctx, tensor);
+static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, struct ggml_tensor * tensor) {
+    struct ggml_tensor * dup = ggml_copy_tensor(ctx, tensor->type, GGML_MAX_DIMS, tensor->ne);
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
         dup->nb[i] = tensor->nb[i];
     }
+
+    ggml_shared_mem_t shm = ggml_shared_mem_new();
+    if (!shm) {
+        GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
+        return NULL;
+    }
+    tensor->shared = shm;
+
+    shm = ggml_shared_mem_new();
+    if (!shm) {
+        GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
+        return NULL;
+    }
+    dup->shared = shm;
+
     return dup;
 }
 
@@ -1702,20 +1717,18 @@ enum ggml_status ggml_backend_tensor_alloc(ggml_backend_buffer_t buffer, struct 
     GGML_ASSERT((char *)addr + ggml_backend_buffer_get_alloc_size(buffer, tensor) <=
                 (char *)ggml_backend_buffer_get_base(buffer) + ggml_backend_buffer_get_size(buffer));
 
-    ggml_shared_mem_t mem = ggml_shared_mem_new();
-    size_t size = ggml_backend_buffer_get_alloc_size(buffer, tensor);
-    mem->alloc(mem, size);
-    if (GGML_SHARED_CL_CONTEXT) {
-        mem->alloc_cl(mem, GGML_SHARED_CL_CONTEXT, size);
-
-        // clEnqueueMapBuffer(GGML_SHARED_CL_QUEUE, mem->cmem, CL_TRUE, CL_MAP_WRITE, 0,
-        //     size, 0, NULL, NULL, NULL);
-    }
-
     tensor->buffer = buffer;
-    // tensor->data = addr;
-    tensor->data = mem->mem;
-    tensor->shared = mem;
+    tensor->data = addr;
+    if (tensor->shared && tensor->shared->mem == NULL) {
+        ggml_shared_mem_t shm = tensor->shared;
+        size_t data_size = ggml_backend_buffer_get_alloc_size(buffer, tensor);
+        shm->alloc(shm, data_size);
+        if (GGML_SHARED_CL_CONTEXT) {
+            shm->alloc_cl(shm, GGML_SHARED_CL_CONTEXT, data_size);
+        }
+
+        tensor->data = tensor->shared->mem;
+    }
     return ggml_backend_buffer_init_tensor(buffer, tensor);
 }
 

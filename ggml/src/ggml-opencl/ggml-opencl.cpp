@@ -2716,24 +2716,15 @@ static enum ggml_status ggml_backend_opencl_buffer_init_tensor(ggml_backend_buff
         {
             size_t offset = (char *) tensor->data - (char *) ggml_backend_opencl_buffer_get_base(buffer);
 
-            if (tensor->shared == NULL) {
-                ggml_shared_mem_t mem = ggml_shared_mem_new();
-                mem->alloc(mem, ggml_nbytes(tensor));
-                tensor->shared = mem;
-            }
-
-            if (tensor->shared->cmem == NULL) {
-                ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
-
-                cl_context context = backend_ctx->context;
-                tensor->shared->alloc_cl(tensor->shared, context, ggml_nbytes(tensor));
-            }
-
             ggml_tensor_extra_cl * extra = ctx->ggml_opencl_alloc_temp_tensor_extra();
-            // extra->offset = offset;
-            // extra->data_device = ctx->buffer[0];
-            extra->offset = 0;
-            extra->data_device = tensor->shared->cmem;
+            if (tensor->shared && tensor->shared->cmem) {
+                extra->offset = 0;
+                extra->data_device = tensor->shared->cmem;
+            }else {
+                extra->offset = offset;
+                extra->data_device = ctx->buffer[0];
+            }
+
             extra->actual_size = ggml_nbytes(tensor);
 
             tensor->extra = extra;
@@ -3010,7 +3001,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     GGML_ASSERT(extra);
 
     if (src && src->shared && src->shared->cmem) {
+    // if (0) {
+        // clEnqueueUnmapMemObject(queue, src->shared->cmem, src->shared->mem, 0, NULL, NULL);
+        tensor->shared->free(tensor->shared);
+
         extra->data_device = src->shared->cmem;
+        tensor->shared = src->shared;
 
         // clEnqueueUnmapMemObject(GGML_SHARED_CL_QUEUE, src->shared->cmem, src->data, 0, NULL, NULL);
         // CL_CHECK(clEnqueueWriteBuffer(
@@ -3018,7 +3014,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         //     size, data, 0, NULL, NULL));
     }else {
         CL_CHECK(clEnqueueWriteBuffer(
-            queue, extra->data_device, CL_FALSE, extra->offset + offset,
+            queue, extra->data_device, CL_TRUE, extra->offset + offset,
             size, data, 0, NULL, NULL));
     }
 
@@ -3073,15 +3069,17 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
 
     ggml_tensor_extra_cl * extra = (ggml_tensor_extra_cl *) tensor->extra;
 
-    if (dest && dest->shared && dest->shared->cmem) {
+    // if (dest && dest->shared && dest->shared->cmem) {
+    if (1) {
         // extra->data_device = dest->shared->cmem;
-        dest->shared->cmem = extra->data_device;
+        // memcpy(data, tensor->data, size);
+        dest->data = tensor->data;
 
         // CL_CHECK(clEnqueueReadBuffer(
         //     queue, extra->data_device, CL_TRUE, extra->offset + tensor->view_offs + offset,
         //     size, data, 0, NULL, NULL));
-        dest->data = clEnqueueMapBuffer(GGML_SHARED_CL_QUEUE, dest->shared->cmem, CL_FALSE, CL_MAP_READ | CL_MAP_WRITE, 0,
-                                             size, 0, NULL, NULL, NULL);
+        // dest->data = clEnqueueMapBuffer(GGML_SHARED_CL_QUEUE, dest->shared->cmem, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0,
+        //                                      size, 0, NULL, NULL, NULL);
     }else {
         CL_CHECK(clEnqueueReadBuffer(
             queue, extra->data_device, CL_TRUE, extra->offset + tensor->view_offs + offset,

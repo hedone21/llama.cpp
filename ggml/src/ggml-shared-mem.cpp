@@ -211,7 +211,7 @@ int ggml_shared_mem_alloc_cl(ggml_shared_mem_t shared_mem, cl_context context, s
     }
 
     shared_mem->cmem = mem;
-    shared_mem->mem = clEnqueueMapBuffer(GGML_SHARED_CL_QUEUE, mem, CL_FALSE, CL_MAP_READ | CL_MAP_WRITE, 0,
+    shared_mem->mem = clEnqueueMapBuffer(GGML_SHARED_CL_QUEUE, mem, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0,
         size, 0, NULL, NULL, &err);
 
     return 0;

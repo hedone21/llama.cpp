@@ -1655,7 +1655,8 @@ static struct ggml_tensor * ggml_new_tensor_impl(
     void * tensor_data = obj_alloc_size > 0 ? (void *)(result + 1) : data;
     ggml_shared_mem_t shm = NULL;
 
-    if (is_shared) {
+    if (0) {
+        GGML_LOG_ERROR("[MYGO] data_size = %zu\n", data_size);
         shm = ggml_shared_mem_new();
         if (!shm) {
             GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
