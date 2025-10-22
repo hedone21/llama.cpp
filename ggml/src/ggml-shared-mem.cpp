@@ -182,15 +182,16 @@ int ggml_shared_mem_alloc_cl(ggml_shared_mem_t shared_mem, cl_context context, s
         return -1;
     }
 
-    if (shared_mem->mem == NULL || shared_mem->fd < 0) {
-        GGML_LOG_ERROR("[MYGO] %s: shared memory not allocated\n", __func__);
-        return -1;
-    }
+    // if (shared_mem->mem == NULL || shared_mem->fd < 0) {
+    //     GGML_LOG_ERROR("[MYGO] %s: shared memory not allocated\n", __func__);
+    //     return -1;
+    // }
 
-    if (shared_mem->mem_size < size) {
-        GGML_LOG_ERROR("[MYGO] %s: shared memory is insuffient\n", __func__);
-        return -1;
-    }
+    shared_mem->mem_size = size;
+    // if (shared_mem->mem_size < size) {
+    //     GGML_LOG_ERROR("[MYGO] %s: shared memory is insuffient\n", __func__);
+    //     return -1;
+    // }
 
     cl_int err;
     cl_mem_ion_host_ptr host_ptr = {0};

@@ -3002,6 +3002,8 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
     if (src && src->shared && src->shared->cmem) {
     // if (0) {
+        // GGML_LOG_ERROR("[MYGO] %s: size=%zu tensor->shared=%p src->shared=%p\n",
+        //     __func__, size, tensor->shared, src->shared);
         // clEnqueueUnmapMemObject(queue, src->shared->cmem, src->shared->mem, 0, NULL, NULL);
         tensor->shared->free(tensor->shared);
 
@@ -3071,6 +3073,8 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
 
     // if (dest && dest->shared && dest->shared->cmem) {
     if (1) {
+        // GGML_LOG_ERROR("[MYGO] %s: size=%zu tensor->shared=%p dest->shared=%p\n",
+        //     __func__, size, tensor->shared, dest->shared);
         // extra->data_device = dest->shared->cmem;
         // memcpy(data, tensor->data, size);
         dest->data = tensor->data;

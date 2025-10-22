@@ -1722,12 +1722,11 @@ enum ggml_status ggml_backend_tensor_alloc(ggml_backend_buffer_t buffer, struct 
     if (tensor->shared && tensor->shared->mem == NULL) {
         ggml_shared_mem_t shm = tensor->shared;
         size_t data_size = ggml_backend_buffer_get_alloc_size(buffer, tensor);
-        shm->alloc(shm, data_size);
+        // shm->alloc(shm, data_size);
         if (GGML_SHARED_CL_CONTEXT) {
             shm->alloc_cl(shm, GGML_SHARED_CL_CONTEXT, data_size);
+            tensor->data = tensor->shared->mem;
         }
-
-        tensor->data = tensor->shared->mem;
     }
     return ggml_backend_buffer_init_tensor(buffer, tensor);
 }
