@@ -14,46 +14,17 @@
 // #define CL_MEM_ION_HOST_PTR_QCOM         0x40B2
 #define CL_MEM_EXT_HOST_PTR_QCOM                   (1 << 29)
 #define LOAD_FACTOR_THRESHOLD 0.75 // 크기 조절을 결정하는 임계값
+#define GGML_MAX_SHARED_MEM_POOLS 128
 
 cl_context GGML_SHARED_CL_CONTEXT = NULL;
 cl_command_queue GGML_SHARED_CL_QUEUE = NULL;
 
-// 해시맵의 각 항목(슬롯)을 나타내는 구조체
-typedef struct {
-    void* key;                 // 키 (포인터 주소)
-    ggml_shared_mem_t value;  // 값 (구조체 포인터)
-    bool is_occupied;          // 해당 슬롯이 사용 중인지 여부
-} hashmap_entry_t;
-
-// 해시맵 전체를 나타내는 구조체
-typedef struct {
-    hashmap_entry_t* entries;  // 항목 배열
-    size_t capacity;           // 총 용량
-    size_t size;               // 현재 저장된 항목의 수
-} hashmap_t;
-
-hashmap_t* hashmap_create(size_t initial_capacity);
-void hashmap_destroy(hashmap_t* map);
-bool hashmap_put(hashmap_t* map, void* key, ggml_shared_mem_t value);
-ggml_shared_mem_t hashmap_get(hashmap_t* map, void* key);
-bool hashmap_remove(hashmap_t* map, void* key);
-
-// 간단한 포인터 주소 해시 함수
-static size_t hash_pointer(void* ptr, size_t capacity) {
-    // 포인터 주소(정수)를 비트 연산하여 해시 값을 만듭니다.
-    // 이는 간단한 예시이며, 더 정교한 해시 함수를 사용할 수도 있습니다.
-    size_t hash = (size_t)ptr;
-    hash = (hash >> 16) ^ hash;
-    return hash % capacity;
-}
-
-// 내부 사용 함수: 크기 조절
-static bool hashmap_resize(hashmap_t* map, size_t new_capacity);
-
+static int IDX = 0;
 static ggml_shared_mem_pool_t global_pool = NULL;
 
 struct ggml_shared_mem_pool_private {
-    hashmap_t *map;
+    ggml_shared_mem_t shared_mem[GGML_MAX_SHARED_MEM_POOLS];
+    int mem_pos;
 };
 
 struct ggml_shared_mem_private {
@@ -64,7 +35,7 @@ struct ggml_shared_mem_private {
     RpcMemToFdFn_t rpcmem_to_fd;
 };
 
-static ggml_shared_mem_t ggml_shared_mem_pool_get(ggml_shared_mem_pool_t pool, void* key) {
+static ggml_shared_mem_t ggml_shared_mem_pool_get(ggml_shared_mem_pool_t pool) {
     if (pool == NULL || pool->priv == NULL) {
         GGML_LOG_ERROR("[MYGO] %s: invalid pool\n", __func__);
         return NULL;
@@ -73,24 +44,12 @@ static ggml_shared_mem_t ggml_shared_mem_pool_get(ggml_shared_mem_pool_t pool, v
     struct ggml_shared_mem_pool_private* priv = pool->priv;
     assert(priv != NULL);
 
-    ggml_shared_mem_t mem = hashmap_get(priv->map, key);
-    if (mem == NULL) {
-        mem = ggml_shared_mem_new();
-        hashmap_put(priv->map, key, mem);
+    // This is cirular allocation
+    if (priv->mem_pos >= GGML_MAX_SHARED_MEM_POOLS) {
+        priv->mem_pos = 0;
     }
 
-    return mem;
-}
-
-void ggml_shared_mem_pool_put(ggml_shared_mem_pool_t pool, void* key, ggml_shared_mem_t shared_mem) {
-    if (pool == NULL || pool->priv == NULL || shared_mem == NULL || shared_mem->priv == NULL) {
-        GGML_LOG_ERROR("[MYGO] %s: invalid pool or shared_mem\n", __func__);
-        return;
-    }
-
-    struct ggml_shared_mem_pool_private* priv = pool->priv;
-
-    hashmap_put(priv->map, key, shared_mem);
+    return priv->shared_mem[priv->mem_pos++];
 }
 
 static void ggml_shared_mem_pool_free(ggml_shared_mem_pool_t pool) {
@@ -101,6 +60,14 @@ static void ggml_shared_mem_pool_free(ggml_shared_mem_pool_t pool) {
 
     struct ggml_shared_mem_pool_private* priv = pool->priv;
     assert(priv != NULL);
+
+    for (int i = 0; i < GGML_MAX_SHARED_MEM_POOLS; i++) {
+        ggml_shared_mem_t shared_mem = priv->shared_mem[i];
+        if (shared_mem != NULL) {
+            shared_mem->free(shared_mem);
+            priv->shared_mem[i] = NULL;
+        }
+    }
 
     free(priv);
     free(pool);
@@ -121,12 +88,19 @@ static ggml_shared_mem_pool_t ggml_shared_mem_pool_new(void) {
         return NULL;
     }
 
-    priv->map = hashmap_create(256);
+    priv->mem_pos = 0;
+
+    for (int i = 0; i < GGML_MAX_SHARED_MEM_POOLS; i++) {
+        ggml_shared_mem_t shared_mem = ggml_shared_mem_new();
+        priv->shared_mem[i] = shared_mem;
+        shared_mem->alloc_cl(shared_mem, GGML_SHARED_CL_CONTEXT, 128 * 1024); // Preallocate 128KB
+
+        // GGML_LOG_ERROR("[MYGO] %s: preloading shared memory pool %d with size %zu\n", __func__, i, shared_mem->mem_size);
+    }
 
     pool->priv = priv;
 
     pool->get = ggml_shared_mem_pool_get;
-    pool->put = ggml_shared_mem_pool_put;
     pool->free = ggml_shared_mem_pool_free;
 
     return pool;
@@ -141,7 +115,7 @@ ggml_shared_mem_pool_t ggml_get_shared_mem_pool(void) {
 
 int ggml_shared_mem_alloc(ggml_shared_mem_t shared_mem, size_t size) {
     if (shared_mem == NULL || shared_mem->priv == NULL) {
-        GGML_LOG_ERROR("[MYGO] %s: invalid shared_mem\n", __func__);
+        GGML_LOG_ERROR("[MYGO] %s/%d: invalid shared_mem\n", __func__, __LINE__);
         return -1;
     }
 
@@ -178,7 +152,7 @@ int ggml_shared_mem_alloc(ggml_shared_mem_t shared_mem, size_t size) {
 
 int ggml_shared_mem_alloc_cl(ggml_shared_mem_t shared_mem, cl_context context, size_t size) {
     if (shared_mem == NULL || shared_mem->priv == NULL) {
-        GGML_LOG_ERROR("[MYGO] %s: invalid shared_mem\n", __func__);
+        GGML_LOG_ERROR("[MYGO] %s/%d: invalid shared_mem\n", __func__, __LINE__);
         return -1;
     }
 
@@ -199,8 +173,6 @@ int ggml_shared_mem_alloc_cl(ggml_shared_mem_t shared_mem, cl_context context, s
     host_ptr.ext_host_ptr.host_cache_policy = CL_MEM_HOST_UNCACHED_QCOM;
     host_ptr.ion_hostptr = shared_mem->mem;
     host_ptr.ion_filedesc = shared_mem->fd;
-
-    // GGML_LOG_ERROR("[MYGO] %s: creating cl buffer with size %zu\n", __func__, shared_mem->mem_size);
 
     // cl_mem mem = clCreateBuffer(context, CL_MEM_USE_HOST_PTR | CL_MEM_EXT_HOST_PTR_QCOM,
     //                             shared_mem->mem_size, &host_ptr, &err);
@@ -282,168 +254,9 @@ ggml_shared_mem_t ggml_shared_mem_new(void) {
     shared_mem->mem_size = 0;
     shared_mem->fd = -1;
 
-    shared_mem->alloc = ggml_shared_mem_alloc;
+    // shared_mem->alloc = ggml_shared_mem_alloc;
     shared_mem->alloc_cl = ggml_shared_mem_alloc_cl;
     shared_mem->free = ggml_shared_mem_free;
 
     return shared_mem;
 }
-
-hashmap_t* hashmap_create(size_t initial_capacity) {
-    if (initial_capacity == 0) {
-        initial_capacity = 16; // 기본 초기 용량
-    }
-
-    hashmap_t* map = (hashmap_t*)malloc(sizeof(hashmap_t));
-    if (!map) {
-        return NULL;
-    }
-
-    map->entries = (hashmap_entry_t*)calloc(initial_capacity, sizeof(hashmap_entry_t));
-    if (!map->entries) {
-        free(map);
-        return NULL;
-    }
-
-    map->capacity = initial_capacity;
-    map->size = 0;
-
-    return map;
-}
-
-void hashmap_destroy(hashmap_t* map) {
-    if (!map) {
-        return;
-    }
-    free(map->entries);
-    free(map);
-}
-
-bool hashmap_put(hashmap_t* map, void* key, ggml_shared_mem_t value) {
-    if (!map || !key) {
-        return false;
-    }
-
-    // 로드 팩터가 임계값을 넘으면 크기를 두 배로 늘립니다.
-    if ((double)map->size / map->capacity > LOAD_FACTOR_THRESHOLD) {
-        if (!hashmap_resize(map, map->capacity * 2)) {
-            return false;
-        }
-    }
-
-    size_t index = hash_pointer(key, map->capacity);
-
-    // 선형 탐사 (Linear Probing)
-    for (size_t i = 0; i < map->capacity; ++i) {
-        size_t current_index = (index + i) % map->capacity;
-        hashmap_entry_t* entry = &map->entries[current_index];
-
-        // 키가 이미 존재하면 값만 업데이트
-        if (entry->is_occupied && entry->key == key) {
-            entry->value = value;
-            return true;
-        }
-
-        // 비어있는 슬롯을 찾으면 데이터 삽입
-        if (!entry->is_occupied) {
-            entry->key = key;
-            entry->value = value;
-            entry->is_occupied = true;
-            map->size++;
-            return true;
-        }
-    }
-
-    // 해시맵이 가득 찬 경우 (이론상 resize 로직 때문에 발생하기 어려움)
-    return false;
-}
-
-ggml_shared_mem_t hashmap_get(hashmap_t* map, void* key) {
-    if (!map || !key) {
-        return NULL;
-    }
-
-    size_t index = hash_pointer(key, map->capacity);
-
-    for (size_t i = 0; i < map->capacity; ++i) {
-        size_t current_index = (index + i) % map->capacity;
-        hashmap_entry_t* entry = &map->entries[current_index];
-
-        // 해당 슬롯이 비어있으면 키가 존재하지 않음
-        if (!entry->is_occupied) {
-            // 단, 삭제된 항목이 있을 수 있으므로 계속 탐색해야 하지만,
-            // 이 간단한 구현에서는 삭제 시 is_occupied만 false로 바꾸므로 여기서 중단.
-            // (더 정교한 구현에서는 DELETED 상태를 둘 수 있음)
-            return NULL;
-        }
-
-        if (entry->key == key) {
-            return entry->value;
-        }
-    }
-
-    return NULL;
-}
-
-bool hashmap_remove(hashmap_t* map, void* key) {
-    if (!map || !key) {
-        return false;
-    }
-
-    size_t index = hash_pointer(key, map->capacity);
-
-    for (size_t i = 0; i < map->capacity; ++i) {
-        size_t current_index = (index + i) % map->capacity;
-        hashmap_entry_t* entry = &map->entries[current_index];
-
-        if (entry->is_occupied && entry->key == key) {
-            entry->is_occupied = false;
-            entry->key = NULL;
-            entry->value = NULL;
-            map->size--;
-            // TODO: 삭제 후 탐색 문제를 해결하기 위해 삭제된 항목에 대한 표시(tombstone)를
-            // 추가하고 get() 로직을 수정하는 것이 더 안정적입니다.
-            // 이 구현은 간단함을 위해 생략합니다.
-            return true;
-        }
-    }
-
-    return false;
-}
-
-
-static bool hashmap_resize(hashmap_t* map, size_t new_capacity) {
-    if (new_capacity < map->capacity) return false;
-
-    hashmap_entry_t* new_entries = (hashmap_entry_t*)calloc(new_capacity, sizeof(hashmap_entry_t));
-    if (!new_entries) {
-        return false;
-    }
-
-    // 기존 항목들을 새로운 해시맵에 재배치
-    for (size_t i = 0; i < map->capacity; ++i) {
-        if (map->entries[i].is_occupied) {
-            void* key = map->entries[i].key;
-            ggml_shared_mem_t value = map->entries[i].value;
-            size_t new_index = hash_pointer(key, new_capacity);
-
-            // 새 위치에서 충돌 해결
-            for (size_t j = 0; j < new_capacity; ++j) {
-                size_t current_index = (new_index + j) % new_capacity;
-                if (!new_entries[current_index].is_occupied) {
-                    new_entries[current_index].key = key;
-                    new_entries[current_index].value = value;
-                    new_entries[current_index].is_occupied = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    free(map->entries);
-    map->entries = new_entries;
-    map->capacity = new_capacity;
-
-    return true;
-}
-

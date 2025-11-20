@@ -1653,21 +1653,6 @@ static struct ggml_tensor * ggml_new_tensor_impl(
     struct ggml_tensor * const result = (struct ggml_tensor *)((char *)ctx->mem_buffer + obj_new->offs);
 
     void * tensor_data = obj_alloc_size > 0 ? (void *)(result + 1) : data;
-    ggml_shared_mem_t shm = NULL;
-
-    if (0) {
-        GGML_LOG_ERROR("[MYGO] data_size = %zu\n", data_size);
-        shm = ggml_shared_mem_new();
-        if (!shm) {
-            GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
-            return NULL;
-        }
-        shm->alloc(shm, data_size);
-        if (GGML_SHARED_CL_CONTEXT) {
-            shm->alloc_cl(shm, GGML_SHARED_CL_CONTEXT, data_size);
-        }
-        tensor_data = shm->mem;
-    }
 
     *result = (struct ggml_tensor) {
         /*.type         =*/ type,
@@ -1683,7 +1668,7 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         /*.data         =*/ tensor_data,
         /*.name         =*/ { 0 },
         /*.extra        =*/ NULL,
-        /*.shared       =*/ shm,
+        /*.shared       =*/ NULL,
     };
 
     // TODO: this should not be needed as long as we don't rely on aligned SIMD loads

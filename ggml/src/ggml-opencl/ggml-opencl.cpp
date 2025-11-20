@@ -3005,7 +3005,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         // GGML_LOG_ERROR("[MYGO] %s: size=%zu tensor->shared=%p src->shared=%p\n",
         //     __func__, size, tensor->shared, src->shared);
         // clEnqueueUnmapMemObject(queue, src->shared->cmem, src->shared->mem, 0, NULL, NULL);
-        tensor->shared->free(tensor->shared);
+        // tensor->shared->free(tensor->shared);
 
         extra->data_device = src->shared->cmem;
         tensor->shared = src->shared;
