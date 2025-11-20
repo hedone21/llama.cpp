@@ -1,6 +1,7 @@
 // Note: porting this file to C++ is a work in progress
 
 #include "ggml-shared-mem.h"
+#include "ggml-utils.h"
 #include <CL/cl.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -617,6 +618,9 @@ static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, st
         dup->nb[i] = tensor->nb[i];
     }
 
+    // ggml_shared_mem_pool_t pool = ggml_get_shared_mem_pool();
+
+    // ggml_shared_mem_t shm = pool->get(pool);
     ggml_shared_mem_t shm = ggml_shared_mem_new();
     if (!shm) {
         GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
@@ -624,6 +628,7 @@ static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, st
     }
     tensor->shared = shm;
 
+    // shm = pool->get(pool);
     shm = ggml_shared_mem_new();
     if (!shm) {
         GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
@@ -760,12 +765,13 @@ static char causes[GGML_DEFAULT_GRAPH_SIZE*16 + GGML_SCHED_MAX_SPLITS_DEBUG*GGML
 #endif
 
 // returns the backend that should be used for the node based on the current locations
-static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, struct ggml_tensor * tensor) {
+static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, struct ggml_tensor * tensor, bool allow_offload) {
     // NOTE: If needed, custom rules for specific ops can be added here
-    // if (strncmp(tensor->name, "ffn", 3) == 0) {
-    //     SET_CAUSE(tensor, "0.name");
-    //     return 0;
-    // }
+    if (allow_offload && (tensor->op == GGML_OP_MUL || tensor->op == GGML_OP_RMS_NORM)) {
+        // GGML_LOG_ERROR("[MYGO] ggml_backend_sched_backend_id_from_cur: special op found: %s\n", tensor->name);
+        SET_CAUSE(tensor, "0.name");
+        return 0;
+    }
 
     // assign pre-allocated nodes to their backend
     int cur_backend_id = ggml_backend_sched_backend_from_buffer(sched, tensor, tensor);
@@ -914,6 +920,9 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         /* .no_alloc =   */ true
     };
 
+    double cpu_usage = ggml_utils_get_cpu_usage();
+    // GGML_LOG_ERROR("[MYGO] ggml_backend_sched_split_graph: CPU usage before scheduling: %.2f%%\n", cpu_usage);
+
     ggml_free(sched->ctx);
 
     sched->ctx = ggml_init(params);
@@ -927,7 +936,7 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         int * leaf_backend_id = &tensor_backend_id(leaf);
         // do not overwrite user assignments
         if (*leaf_backend_id == -1) {
-            *leaf_backend_id = ggml_backend_sched_backend_id_from_cur(sched, leaf);
+            *leaf_backend_id = ggml_backend_sched_backend_id_from_cur(sched, leaf, cpu_usage < 700.0);
         }
     }
 
@@ -936,7 +945,7 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         int * node_backend_id = &tensor_backend_id(node);
         // do not overwrite user assignments
         if (*node_backend_id == -1) {
-            *node_backend_id = ggml_backend_sched_backend_id_from_cur(sched, node);
+            *node_backend_id = ggml_backend_sched_backend_id_from_cur(sched, node, cpu_usage < 700.0);
 
 #if 0
             // src
@@ -1099,6 +1108,15 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         }
     }
 
+    // for (int i = 0; i < graph->n_nodes; i++) {
+    //     struct ggml_tensor * node = graph->nodes[i];
+    //     if ((strncmp(node->name, "Qcur-", 5) == 0 || strncmp(node->name, "Kcur-", 5) == 0) && node->op == GGML_OP_ROPE) {
+    //         GGML_LOG_ERROR("[MYGO] name: %s (%d) backend: %d\n", node->name, node->op, tensor_backend_id(node));
+    //         SET_CAUSE(tensor, "0.name");
+    //         tensor_backend_id(node) = 1;
+    //     }
+    // }
+
     // pass 4: assign backends to remaining src from dst and view_src
     for (int i = 0; i < graph->n_nodes; i++) {
         struct ggml_tensor * node = graph->nodes[i];
@@ -1154,7 +1172,6 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
             assert(node_backend_id != -1); // all nodes should be assigned by now, this can happen if there is no CPU fallback
 
             // check if we should start a new split based on the sources of the current node
-            // NOTE: Always start a new split for every nodes.
             bool need_new_split = true;
             if (node_backend_id == cur_backend_id && split->n_inputs > 0) {
                 for (int j = 0; j < GGML_MAX_SRC; j++) {
@@ -1724,7 +1741,9 @@ enum ggml_status ggml_backend_tensor_alloc(ggml_backend_buffer_t buffer, struct 
         size_t data_size = ggml_backend_buffer_get_alloc_size(buffer, tensor);
         // shm->alloc(shm, data_size);
         if (GGML_SHARED_CL_CONTEXT) {
+            GGML_ASSERT(shm->alloc_cl != NULL);
             shm->alloc_cl(shm, GGML_SHARED_CL_CONTEXT, data_size);
+            // shm->alloc_cl(shm, GGML_SHARED_CL_CONTEXT, 128 * 1024);
             tensor->data = tensor->shared->mem;
         }
     }
