@@ -4,6 +4,7 @@
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #define ggml_offsetof(type, member) ((size_t)&(((type *)0)->member))
 #define ggml_container_of(ptr, type, member) \
@@ -17,6 +18,7 @@ extern "C" {
 typedef struct ggml_shared_mem* ggml_shared_mem_t;
 typedef struct ggml_shared_mem_pool* ggml_shared_mem_pool_t;
 
+extern bool GGML_TENSOR_USE_SHARED_MEM;
 extern cl_context GGML_SHARED_CL_CONTEXT;
 extern cl_command_queue GGML_SHARED_CL_QUEUE;
 

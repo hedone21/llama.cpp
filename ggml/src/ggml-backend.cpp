@@ -618,23 +618,18 @@ static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, st
         dup->nb[i] = tensor->nb[i];
     }
 
-    // ggml_shared_mem_pool_t pool = ggml_get_shared_mem_pool();
-
-    // ggml_shared_mem_t shm = pool->get(pool);
-    ggml_shared_mem_t shm = ggml_shared_mem_new();
-    if (!shm) {
-        GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
-        return NULL;
+    if (GGML_TENSOR_USE_SHARED_MEM) {
+        ggml_shared_mem_t shm = NULL;
+        ggml_shared_mem_pool_t pool = ggml_get_shared_mem_pool();
+        shm = pool->get(pool);
+        // shm = ggml_shared_mem_new();
+        if (!shm) {
+            GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
+            return NULL;
+        }
+        tensor->shared = shm;
+        dup->shared = shm;
     }
-    tensor->shared = shm;
-
-    // shm = pool->get(pool);
-    shm = ggml_shared_mem_new();
-    if (!shm) {
-        GGML_LOG_ERROR("%s: failed to create shared memory for tensor data\n", __func__);
-        return NULL;
-    }
-    dup->shared = shm;
 
     return dup;
 }
@@ -920,6 +915,7 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         /* .no_alloc =   */ true
     };
 
+    GGML_TENSOR_USE_SHARED_MEM = true;
     double cpu_usage = ggml_utils_get_cpu_usage();
     // GGML_LOG_ERROR("[MYGO] ggml_backend_sched_split_graph: CPU usage before scheduling: %.2f%%\n", cpu_usage);
 

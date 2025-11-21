@@ -16,6 +16,8 @@
 #define LOAD_FACTOR_THRESHOLD 0.75 // 크기 조절을 결정하는 임계값
 #define GGML_MAX_SHARED_MEM_POOLS 128
 
+bool GGML_TENSOR_USE_SHARED_MEM = false;
+
 cl_context GGML_SHARED_CL_CONTEXT = NULL;
 cl_command_queue GGML_SHARED_CL_QUEUE = NULL;
 
