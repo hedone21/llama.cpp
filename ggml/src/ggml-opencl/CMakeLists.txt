@@ -5,6 +5,8 @@ set(TARGET_NAME ggml-opencl)
 
 ggml_add_backend_library(${TARGET_NAME}
                          ggml-opencl.cpp
+                         argus-dagger.cpp
+                         argus-dagger-cl.cpp
                          ../../include/ggml-opencl.h)
 target_link_libraries(${TARGET_NAME} PRIVATE ${OpenCL_LIBRARIES})
 target_include_directories(${TARGET_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})

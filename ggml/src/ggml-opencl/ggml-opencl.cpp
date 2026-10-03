@@ -15,6 +15,8 @@
 
 #include <CL/cl.h>
 
+#include "argus-dagger-cl.h"
+
 #include <inttypes.h>
 #include <string.h>
 
@@ -722,19 +724,34 @@ struct ggml_backend_opencl_context {
         const bool is_attn_q1 = (kname_len >= 8) &&
             (strstr(kname, "flash_attn_") != NULL) &&
             (strstr(kname, "_q1") != NULL);
-        if (is_attn_q1) {
+        const bool argus_ev = argus_dagger::want_event();
+        if (is_attn_q1 || argus_ev) {
             cl_event evt;
             CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, &evt));
-            attn_events.push_back(evt);
-            if (attn_kernel_name.empty()) {
-                attn_kernel_name.assign(kname, kname_len > 0 ? kname_len - 1 : 0);
+            if (argus_ev) {
+                argus_dagger::note_event(evt);
+            }
+            if (is_attn_q1) {
+                attn_events.push_back(evt);
+                if (attn_kernel_name.empty()) {
+                    attn_kernel_name.assign(kname, kname_len > 0 ? kname_len - 1 : 0);
+                }
+            } else {
+                CL_CHECK(clReleaseEvent(evt));
             }
         } else {
             CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL));
         }
 #else
         GGML_UNUSED(tensor);
-        CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL));
+        if (argus_dagger::want_event()) {
+            cl_event evt;
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, &evt));
+            argus_dagger::note_event(evt);
+            CL_CHECK(clReleaseEvent(evt));
+        } else {
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL));
+        }
 #endif
     }
 
@@ -772,6 +789,7 @@ struct ggml_backend_opencl_context {
     void free() {
         ref_count--;
         if (ref_count == 0) {
+            argus_dagger::finish();
 #ifdef GGML_OPENCL_PROFILING
             write_profiling_info();
             profiling_info.clear();
@@ -3073,6 +3091,9 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 #if defined(GGML_OPENCL_PROFILING) || defined(GGML_OPENCL_ATTN_EVENT)
     command_queue_props |= CL_QUEUE_PROFILING_ENABLE;
 #endif
+    if (argus_dagger::init_from_env()) {
+        command_queue_props |= CL_QUEUE_PROFILING_ENABLE;
+    }
     CL_CHECK((backend_ctx->queue = clCreateCommandQueue(context, device, command_queue_props, &err), err));
 
     // Load kernels
@@ -3602,6 +3623,8 @@ static void ggml_opencl_op_group_norm_fused(ggml_backend_t backend, ggml_tensor 
 static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
+    argus_dagger::begin_graph(backend_ctx->queue, cgraph);
+
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
 
@@ -3619,22 +3642,30 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         }
 
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
+            argus_dagger::before_op(node, "MUL+ADD");
             ggml_opencl_op_norm_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            argus_dagger::after_op();
             i += 2;
             continue;
         }
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_GROUP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
+            argus_dagger::before_op(node, "MUL+ADD");
             ggml_opencl_op_group_norm_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            argus_dagger::after_op();
             i += 2;
             continue;
         }
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
+            argus_dagger::before_op(node, "MUL");
             ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
+            argus_dagger::after_op();
             i++;
             continue;
         }
 
+        argus_dagger::before_op(node, "");
         bool ok = ggml_cl_compute_forward(backend, node);
+        argus_dagger::after_op();
         if (!ok) {
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
         }
