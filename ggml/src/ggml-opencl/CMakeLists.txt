@@ -7,8 +7,16 @@ ggml_add_backend_library(${TARGET_NAME}
                          ggml-opencl.cpp
                          argus-dagger.cpp
                          argus-dagger-cl.cpp
+                         argus-doppel.cpp
+                         argus-doppel-cl.cpp
                          ../../include/ggml-opencl.h)
 target_link_libraries(${TARGET_NAME} PRIVATE ${OpenCL_LIBRARIES})
+if (ANDROID)
+    # argus-engine tickets/032: keep the c++_static symbols the ARGUS arms pull in (chrono,
+    # std::function, hash tables) local to this library. Exported, they replace libllama's own
+    # copies and change libllama's exports against the baseline build.
+    target_link_options(${TARGET_NAME} PRIVATE "-Wl,--exclude-libs,ALL")
+endif ()
 target_include_directories(${TARGET_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})
 
 if (GGML_OPENCL_PROFILING)

@@ -16,6 +16,7 @@
 #include <CL/cl.h>
 
 #include "argus-dagger-cl.h"
+#include "argus-doppel-cl.h"
 
 #include <inttypes.h>
 #include <string.h>
@@ -54,6 +55,9 @@
 //------------------------------------------------------------------------------
 
 bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor);
+
+// argus-engine tickets/032: when > 0, the q1 flash-attention dispatch covers query heads [0, n) only.
+static int g_argus_fa_heads = 0;
 
 // See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
 // Precompute mp (m' in the paper) and L such that division
@@ -790,6 +794,7 @@ struct ggml_backend_opencl_context {
         ref_count--;
         if (ref_count == 0) {
             argus_dagger::finish();
+            argus_doppel_cl::finish();
 #ifdef GGML_OPENCL_PROFILING
             write_profiling_info();
             profiling_info.clear();
@@ -3094,6 +3099,7 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     if (argus_dagger::init_from_env()) {
         command_queue_props |= CL_QUEUE_PROFILING_ENABLE;
     }
+    argus_doppel_cl::init_from_env();
     CL_CHECK((backend_ctx->queue = clCreateCommandQueue(context, device, command_queue_props, &err), err));
 
     // Load kernels
@@ -3624,6 +3630,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
     argus_dagger::begin_graph(backend_ctx->queue, cgraph);
+    argus_doppel_cl::begin_graph(backend, cgraph);
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -3659,18 +3666,21 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             argus_dagger::before_op(node, "MUL");
             ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
             argus_dagger::after_op();
+            argus_doppel_cl::after(cgraph->nodes[i+1]);
             i++;
             continue;
         }
 
         argus_dagger::before_op(node, "");
-        bool ok = ggml_cl_compute_forward(backend, node);
+        bool ok = argus_doppel_cl::dispatch(node) || ggml_cl_compute_forward(backend, node);
         argus_dagger::after_op();
         if (!ok) {
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
         }
         GGML_ASSERT(ok);
+        argus_doppel_cl::after(node);
     }
+    argus_doppel_cl::end_graph();
 
     return GGML_STATUS_SUCCESS;
 }
@@ -4292,6 +4302,7 @@ inline bool enable_adreno_trans_weight(const ggml_backend_opencl_context *backen
 
 static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
+    argus_doppel_cl::note_input(tensor, data, offset, size);
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -8719,7 +8730,7 @@ static void ggml_cl_flash_attn(ggml_backend_t backend, const ggml_tensor * q, co
     if (n_q == 1) {
         const size_t wg_size = 64;
         size_t local_work_size[] = { wg_size, 1 };
-        size_t global_work_size[] = { wg_size, (size_t)(n_head * n_batch) };
+        size_t global_work_size[] = { wg_size, (size_t)(g_argus_fa_heads > 0 ? g_argus_fa_heads : n_head * n_batch) };
         backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size, local_work_size, dst);
     } else {
         const int block_m = backend_ctx->kernels_flash_attn_bm.at(dk_dv);
@@ -12630,3 +12641,53 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
     func(backend, tensor->src[0], tensor->src[1], tensor);
     return true;
 }
+
+// argus-engine tickets/032: Doppeladler glue entry points that need this file's private types.
+namespace argus_doppel_cl {
+
+bool gpu_forward(ggml_backend * backend, ggml_tensor * node) {
+    return ggml_cl_compute_forward(backend, node);
+}
+
+void gpu_flash_attn_heads(ggml_backend * backend, ggml_tensor * node, int heads) {
+    GGML_ASSERT(node->src[0]->ne[1] == 1 && node->src[0]->ne[3] == 1 && heads > 0 && heads <= node->src[0]->ne[2]);
+    g_argus_fa_heads = heads;
+    ggml_cl_flash_attn(backend, node->src[0], node->src[1], node);
+    g_argus_fa_heads = 0;
+}
+
+void gpu_add_buffer(ggml_backend * backend, ggml_tensor * dst, cl_mem buf, size_t offset) {
+    ggml_tensor_extra_cl extra;
+    extra.data_device = buf;
+    extra.offset      = offset;
+    extra.actual_size = 0;
+    ggml_tensor src1  = *dst;
+    src1.op           = GGML_OP_NONE;
+    for (auto & s : src1.src) {
+        s = nullptr;
+    }
+    src1.view_src  = nullptr;
+    src1.view_offs = 0;
+    src1.extra     = &extra;
+    ggml_cl_add(backend, dst, &src1, dst);
+}
+
+void gpu_tensor_mem(const ggml_tensor * t, cl_mem * mem, size_t * offset) {
+    const ggml_tensor_extra_cl * e = (const ggml_tensor_extra_cl *) t->extra;
+    *mem    = e->data_device;
+    *offset = (size_t) (e->offset + t->view_offs);
+}
+
+cl_command_queue gpu_queue(ggml_backend * backend) {
+    return ((ggml_backend_opencl_context *) backend->context)->queue;
+}
+
+cl_context gpu_context(ggml_backend * backend) {
+    return ((ggml_backend_opencl_context *) backend->context)->context;
+}
+
+cl_device_id gpu_device(ggml_backend * backend) {
+    return ((ggml_backend_opencl_context *) backend->context)->device;
+}
+
+} // namespace argus_doppel_cl
