@@ -349,16 +349,8 @@ TpStats TpController::stats() const {
 // Thread pool
 // ---------------------------------------------------------------------------------------------
 
-static inline void cpu_relax() {
-#if defined(__aarch64__)
-    __asm__ __volatile__("yield");
-#elif defined(__x86_64__)
-    __builtin_ia32_pause();
-#endif
-}
-
 // Spins before a worker sleeps: the ARGUS SpinPool's brief spin (engine/src/thread_pool.rs, 500
-// rounds), so idle workers do not burn cores (and heat) while only the GPU works.
+// rounds of spin_pause), so idle workers do not burn cores (and heat) while only the GPU works.
 static const int SPIN_ROUNDS = 500;
 
 Pool::Pool(int n_total) {
@@ -377,18 +369,34 @@ Pool::~Pool() {
         gen.fetch_add(1);
     }
     cv.notify_all();
+    cv_idle.notify_all();
     for (std::thread & t : workers) {
         t.join();
     }
 }
 
 void Pool::set_active(int n_total) {
-    active_workers.store(std::clamp(n_total - 1, 0, (int) workers.size()));
+    {
+        std::lock_guard<std::mutex> lk(m);
+        active_workers.store(std::clamp(n_total - 1, 0, (int) workers.size()));
+    }
+    cv_idle.notify_all();
 }
 
 void Pool::worker(int idx) {
     uint64_t seen = 0;
     for (;;) {
+        // Outside the active set: sleep until set_active() takes this worker back. ARGUS wakes only
+        // the active workers (thread_pool.rs `worker_threads[..active]`), so the threads the
+        // contention rule removed stay off the cores.
+        if (idx >= active_workers.load()) {
+            std::unique_lock<std::mutex> lk(m);
+            cv_idle.wait(lk, [&] { return idx < active_workers.load() || stop.load(); });
+            if (stop.load()) {
+                return;
+            }
+            continue;
+        }
         uint64_t g;
         int      spins = 0;
         while ((g = gen.load(std::memory_order_acquire)) == seen) {
@@ -396,7 +404,7 @@ void Pool::worker(int idx) {
                 return;
             }
             if (++spins < SPIN_ROUNDS) {
-                cpu_relax();
+                spin_pause();
                 continue;
             }
             std::unique_lock<std::mutex> lk(m);
@@ -445,7 +453,7 @@ void Pool::run(int nt, const std::function<void(int)> & f) {
     // Workers still inside the previous job must be gone before its parameters change.
     open.store(false);
     while (busy.load() != 0) {
-        cpu_relax();
+        spin_pause();
     }
     fn      = &f;
     n_tasks = nt;
@@ -466,11 +474,11 @@ void Pool::run(int nt, const std::function<void(int)> & f) {
         done.fetch_add(1);
     }
     while (done.load() < nt) {
-        cpu_relax();
+        spin_pause();
     }
     open.store(false);
     while (busy.load() != 0) {
-        cpu_relax();
+        spin_pause();
     }
 }
 

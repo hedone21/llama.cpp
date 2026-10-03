@@ -93,10 +93,11 @@ struct HostWeights {
     const float *    bv = nullptr;
 };
 
+// Not zero-filled: as with the ARGUS host cache, only the rows written count in the PSS.
 struct HostKv {
-    std::vector<uint16_t> k; // [n_kv][cap][hd]
-    std::vector<uint16_t> v;
-    int                   len = 0;
+    std::unique_ptr<uint16_t[]> k; // [n_kv][cap][hd]
+    std::unique_ptr<uint16_t[]> v;
+    int                         len = 0;
 };
 
 struct PendingObs {
@@ -148,6 +149,7 @@ struct State {
     std::vector<HostWeights> hw;
 
     // host-mapped buffers: inputs [layer][seg][dim], partials [layer][seg][dim], flags [layer][4]
+    // (one page each, FLAG_STRIDE)
     cl_mem       buf_in = nullptr, buf_out = nullptr, buf_flags = nullptr;
     float *      in_h   = nullptr;
     float *      out_h  = nullptr;
@@ -155,13 +157,16 @@ struct State {
     cl_program   prog   = nullptr;
     cl_kernel    k_flag = nullptr;
 
-    // CPU share
+    // CPU share. The GEMVs run on `pool` (the contention rule shrinks it); attention runs on
+    // `attn_pool`, which keeps every thread, as ARGUS's rayon attention does (ticket 021 §D4).
     std::unique_ptr<Pool>         pool;
+    std::unique_ptr<Pool>         attn_pool;
     std::unique_ptr<TpController> ctl;
     std::vector<HostKv>           kv;
     std::vector<float> x, q, k, v, att, wo_part, g, u, act, down_part;
     AttnScratch        scratch;
     std::vector<PendingObs> pending;
+    bool                    ffn_side = false; // between a layer's ATTN and FFN CPU shares
 
     // counters
     uint64_t tokens = 0, prefill_graphs = 0, pos_reads = 0, kv_catchup = 0, kv_full = 0;
@@ -398,6 +403,11 @@ static void cl_check(cl_int err, const char * what) {
     }
 }
 
+// Ints between two flags: one page each, as ARGUS gives every flag its own buffer
+// (partition_workspace.rs `flags`), so the CPU's reset of one flag never shares a cache line with
+// the GPU's write of another.
+static const int FLAG_STRIDE = 4096 / (int) sizeof(int);
+
 static const char * FLAG_SRC =
     "__kernel void argus_doppel_flag(__global volatile int * f, int idx) { atomic_xchg(&f[idx], 1); }\n";
 
@@ -537,12 +547,13 @@ static void install(ggml_cgraph * g) {
     const size_t io = (size_t) S->n_layers * 2 * S->dim * sizeof(float);
     S->buf_in    = host_buffer(io);
     S->buf_out   = host_buffer(io);
-    S->buf_flags = host_buffer((size_t) S->n_layers * 4 * sizeof(int));
+    const size_t flags_size = (size_t) S->n_layers * 4 * FLAG_STRIDE * sizeof(int);
+    S->buf_flags = host_buffer(flags_size);
     S->in_h      = (float *) map_buffer(S->buf_in, io);
     S->out_h     = (float *) map_buffer(S->buf_out, io);
-    S->flag_h    = (volatile int *) map_buffer(S->buf_flags, (size_t) S->n_layers * 4 * sizeof(int));
+    S->flag_h    = (volatile int *) map_buffer(S->buf_flags, flags_size);
     for (int i = 0; i < S->n_layers * 4; i++) {
-        S->flag_h[i] = 0;
+        S->flag_h[(size_t) i * FLAG_STRIDE] = 0;
     }
     cl_int        err = CL_SUCCESS;
     cl_device_id  dev = gpu_device(S->backend);
@@ -553,12 +564,13 @@ static void install(ggml_cgraph * g) {
     cl_check(err, "clCreateKernel(flag)");
     cl_check(clSetKernelArg(S->k_flag, 0, sizeof(cl_mem), &S->buf_flags), "clSetKernelArg(flag)");
 
-    S->pool = std::make_unique<Pool>(S->threads);
-    S->ctl  = std::make_unique<TpController>(S->n_layers, S->n_head, S->ffn, S->r0, S->threads, S->adaptive);
+    S->pool      = std::make_unique<Pool>(S->threads);
+    S->attn_pool = std::make_unique<Pool>(S->threads);
+    S->ctl       = std::make_unique<TpController>(S->n_layers, S->n_head, S->ffn, S->r0, S->threads, S->adaptive);
     S->kv.resize((size_t) S->n_layers);
     for (HostKv & h : S->kv) {
-        h.k.assign((size_t) S->n_kv * S->kv_cap * S->hd, 0);
-        h.v.assign((size_t) S->n_kv * S->kv_cap * S->hd, 0);
+        h.k.reset(new uint16_t[(size_t) S->n_kv * S->kv_cap * S->hd]);
+        h.v.reset(new uint16_t[(size_t) S->n_kv * S->kv_cap * S->hd]);
     }
     S->x.resize((size_t) S->dim);
     S->q.resize((size_t) S->dim);
@@ -623,12 +635,12 @@ static void catch_up(int l, int upto) {
         const size_t row = (size_t) S->n_kv * S->hd; // halves per token row
         std::vector<uint16_t> tmp((size_t) (upto - lo) * row);
         const ggml_tensor * caches[2] = {view_base(S->layers[(size_t) l].set_k), view_base(S->layers[(size_t) l].set_v)};
-        std::vector<uint16_t> * host[2] = {&h.k, &h.v};
+        uint16_t *          host[2]   = {h.k.get(), h.v.get()};
         for (int c = 0; c < 2; c++) {
             read_gpu(caches[c], (size_t) lo * caches[c]->nb[1], tmp.size() * 2, tmp.data());
             for (int p = lo; p < upto; p++) {
                 for (int kvh = 0; kvh < S->n_kv; kvh++) {
-                    memcpy(host[c]->data() + ((size_t) kvh * S->kv_cap + p) * S->hd,
+                    memcpy(host[c] + ((size_t) kvh * S->kv_cap + p) * S->hd,
                            tmp.data() + (size_t) (p - lo) * row + (size_t) kvh * S->hd, (size_t) S->hd * 2);
                 }
             }
@@ -701,7 +713,8 @@ void begin_graph(ggml_backend * backend, ggml_cgraph * g) {
 // ---------------------------------------------------------------------------------------------
 
 static void enqueue_flag(int idx) {
-    cl_check(clSetKernelArg(S->k_flag, 1, sizeof(int), &idx), "clSetKernelArg(flag idx)");
+    const int at = idx * FLAG_STRIDE;
+    cl_check(clSetKernelArg(S->k_flag, 1, sizeof(int), &at), "clSetKernelArg(flag idx)");
     size_t gws = 1;
     cl_check(clEnqueueNDRangeKernel(S->queue, S->k_flag, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr),
              "enqueue flag");
@@ -712,11 +725,11 @@ static void flush() {
 }
 
 static bool flag_up(int idx) {
-    return S->flag_h[idx] != 0;
+    return S->flag_h[(size_t) idx * FLAG_STRIDE] != 0;
 }
 
 static void flag_reset(int idx) {
-    S->flag_h[idx] = 0;
+    S->flag_h[(size_t) idx * FLAG_STRIDE] = 0;
 }
 
 static void poll_pending() {
@@ -748,6 +761,7 @@ static clk::time_point spin(int idx) {
             return t;
         }
         poll_pending();
+        spin_pause();
         if (spins == MAX_SPINS) {
             fatal("flag wait timed out (flag " + std::to_string(idx) + ")");
         }
@@ -899,15 +913,15 @@ static void cpu_attn(int l, int h_g) {
     rope_neox(S->k.data(), 0, S->n_kv, hd, S->n_dims, (double) S->pos, S->freq_base);
     HostKv & kv = S->kv[(size_t) l];
     for (int kvh = 0; kvh < S->n_kv; kvh++) {
-        uint16_t * kd = kv.k.data() + ((size_t) kvh * S->kv_cap + S->slot) * hd;
-        uint16_t * vd = kv.v.data() + ((size_t) kvh * S->kv_cap + S->slot) * hd;
+        uint16_t * kd = kv.k.get() + ((size_t) kvh * S->kv_cap + S->slot) * hd;
+        uint16_t * vd = kv.v.get() + ((size_t) kvh * S->kv_cap + S->slot) * hd;
         for (int d = 0; d < hd; d++) {
             kd[d] = f32_to_f16(S->k[(size_t) kvh * hd + d]);
             vd[d] = f32_to_f16(S->v[(size_t) kvh * hd + d]);
         }
     }
     kv.len = S->slot + 1;
-    attention_heads(*S->pool, S->q.data(), kv.k.data(), kv.v.data(), S->kv_cap, S->n_head, S->n_kv, hd, h_g,
+    attention_heads(*S->attn_pool, S->q.data(), kv.k.get(), kv.v.get(), S->kv_cap, S->n_head, S->n_kv, hd, h_g,
                     S->n_head, kv.len, S->scale, S->att.data(), S->scratch);
     GemvJob wo{w.wo + q_lo, (size_t) dim, S->wo_part.data(), dim};
     gemv_f16_multi(*S->pool, S->att.data() + q_lo, dim - q_lo, &wo, 1);
@@ -949,6 +963,7 @@ static void segment(int l, int seg) {
         enqueue_flag(done_flag);
     }
     flush();
+    S->ffn_side            = false;
     const bool      serial = S->flags && S->ctl->serial(l, seg);
     clk::time_point t0     = spin(in_flag);
     memcpy(S->x.data(), S->in_h + ((size_t) l * 2 + seg) * S->dim, (size_t) S->dim * sizeof(float));
@@ -969,18 +984,11 @@ static void segment(int l, int seg) {
     if (S->flags) {
         observe_after_cpu(l, seg, done_flag, t_cpu0, t_end, serial_t_gpu);
     }
+    S->ffn_side = seg == 0;
 }
 
-void after(ggml_tensor * out) {
-    if (!S || !S->decode) {
-        return;
-    }
-    auto it = S->roles.find(out);
-    if (it == S->roles.end()) {
-        return;
-    }
-    const int l = it->second.first;
-    switch (it->second.second) {
+static void after_role(int l, Role role, ggml_tensor * out) {
+    switch (role) {
         case Role::AttnNorm:
             entry(out, l, 0);
             break;
@@ -1004,6 +1012,21 @@ void after(ggml_tensor * out) {
     }
 }
 
+void after(ggml_tensor * out) {
+    if (!S || !S->decode) {
+        return;
+    }
+    auto it = S->roles.find(out);
+    if (it != S->roles.end()) {
+        after_role(it->second.first, it->second.second, out);
+    }
+    // Catch a late ATTN done-flag after every dispatch up to the FFN CPU share, as early as ARGUS
+    // does (tp_plan.rs FFN run: poll_pending after each dispatch).
+    if (S->ffn_side) {
+        poll_pending();
+    }
+}
+
 static void log_tokens() {
     TpStats st = S->ctl->stats();
     fprintf(stderr, "[DOPPEL] tok=%llu r_attn=%.3f r_ffn=%.3f lookup=%d/%d contention=%llu threads=%d\n",
@@ -1017,6 +1040,7 @@ void end_graph() {
     }
     for (uint64_t spins = 0; !S->pending.empty(); spins++) {
         poll_pending();
+        spin_pause();
         if (spins == MAX_SPINS) {
             fatal("done-flag drain timed out");
         }

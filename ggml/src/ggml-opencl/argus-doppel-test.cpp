@@ -5,12 +5,16 @@
 #include "argus-doppel.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <random>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace argus_doppel;
@@ -494,6 +498,29 @@ static void pool_runs_every_task_once() {
     }
 }
 
+// The contention knob: after set_active(n) at most n threads run tasks, and set_active() back up
+// wakes the workers it had parked.
+static void pool_set_active_limits_threads() {
+    Pool pool(6);
+    auto threads_used = [&](int rounds) {
+        std::mutex                  mu;
+        std::set<std::thread::id>   ids;
+        for (int r = 0; r < rounds; r++) {
+            pool.run(24, [&](int) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                std::lock_guard<std::mutex> lk(mu);
+                ids.insert(std::this_thread::get_id());
+            });
+        }
+        return ids.size();
+    };
+    pool.set_active(2);
+    CHECK(threads_used(20) <= 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // the parked workers fall asleep
+    pool.set_active(6);
+    CHECK(threads_used(20) > 2);
+}
+
 int main() {
     struct T {
         const char * name;
@@ -513,6 +540,7 @@ int main() {
         {"attn_group_split_matches_full", [] { attn_group_split_matches_full(pool4); }},
         {"rope_neox_matches_reference", rope_neox_matches_reference},
         {"pool_runs_every_task_once", pool_runs_every_task_once},
+        {"pool_set_active_limits_threads", pool_set_active_limits_threads},
     };
     for (const T & t : tests) {
         int before = g_fail;

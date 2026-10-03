@@ -4,7 +4,8 @@
 //   ARGUS_DOPPEL_R0=<r>         initial GPU share in (0, 0.995); turns the arm on
 //   ARGUS_DOPPEL_GGUF=<path>    the model file (same as -m): the CPU share reads its weights
 //   ARGUS_DOPPEL_ADAPTIVE=1     adaptive split (Startup -> Descent -> Lookup, ticket 021 §D3)
-//   ARGUS_DOPPEL_THREADS=<n>    CPU threads incl. the dispatch thread (default 8)
+//   ARGUS_DOPPEL_THREADS=<n>    CPU threads incl. the dispatch thread (default 8); the contention
+//                               rule shrinks the GEMV threads only, attention keeps all n
 //   ARGUS_DOPPEL_NO_FLAGS=1     no done-flags, static split (flag-cost arm of criterion 5)
 //   ARGUS_DOPPEL_TRACE=<path>   per-token CSV
 //

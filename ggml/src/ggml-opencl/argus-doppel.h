@@ -181,8 +181,19 @@ struct TpController {
 // Thread pool
 // ---------------------------------------------------------------------------------------------
 
+// One round of a spin wait, as in ARGUS's waits (Rust std::hint::spin_loop: `isb sy` on aarch64,
+// `pause` on x86-64).
+inline void spin_pause() {
+#if defined(__aarch64__)
+    __asm__ __volatile__("isb sy");
+#elif defined(__x86_64__)
+    __builtin_ia32_pause();
+#endif
+}
+
 // Spin pool: the calling (dispatch) thread plus `n_total - 1` workers. Workers spin a short time
-// after a job, then sleep. set_active() limits how many take part (the contention knob).
+// after a job, then sleep. set_active() limits how many take part (the contention knob); the
+// workers outside it sleep until set_active() takes them back.
 class Pool {
   public:
     explicit Pool(int n_total);
@@ -200,18 +211,20 @@ class Pool {
     void worker(int idx);
 
     std::vector<std::thread>          workers;
-    std::atomic<uint64_t>             gen{0};
-    std::atomic<int>                  next{0};
-    std::atomic<int>                  done{0};
-    std::atomic<int>                  busy{0};
-    std::atomic<int>                  sleepers{0};
+    // The atomics every run touches sit on their own cache lines (ARGUS SpinPool `CacheAligned`).
+    alignas(64) std::atomic<uint64_t> gen{0};
+    alignas(64) std::atomic<int>      next{0};
+    alignas(64) std::atomic<int>      done{0};
+    alignas(64) std::atomic<int>      busy{0};
+    alignas(64) std::atomic<int>      sleepers{0};
     std::atomic<int>                  active_workers{0};
     std::atomic<bool>                 stop{false};
     std::atomic<bool>                 open{false};
     int                               n_tasks = 0;
     const std::function<void(int)> *  fn      = nullptr;
     std::mutex                        m;
-    std::condition_variable           cv;
+    std::condition_variable           cv;      // a new job
+    std::condition_variable           cv_idle; // back in the active set, or stop
 };
 
 // ---------------------------------------------------------------------------------------------
