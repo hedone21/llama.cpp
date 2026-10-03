@@ -582,6 +582,39 @@ struct ggml_backend_opencl_context {
 
     std::vector<ProfilingInfo> profiling_info;
 
+#ifdef GGML_OPENCL_ATTN_EVENT
+    // Attention-only event collection (Phase B)
+    std::vector<cl_event> attn_events;
+    std::string           attn_kernel_name;
+
+    void write_attn_event_dump() {
+        if (attn_events.empty()) {
+            fprintf(stderr, "[attn-event] no flash_attn events collected\n");
+            return;
+        }
+        double sum_us = 0.0;
+        double min_us = 1e18;
+        double max_us = 0.0;
+        fprintf(stderr, "[attn-event] dumping %zu events for kernel=%s\n",
+                attn_events.size(), attn_kernel_name.c_str());
+        for (cl_event evt : attn_events) {
+            cl_ulong cmd_start = 0, cmd_end = 0;
+            CL_CHECK(clWaitForEvents(1, &evt));
+            CL_CHECK(clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &cmd_start, NULL));
+            CL_CHECK(clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END,   sizeof(cl_ulong), &cmd_end,   NULL));
+            CL_CHECK(clReleaseEvent(evt));
+            double us = (double)(cmd_end - cmd_start) / 1000.0;
+            sum_us += us;
+            if (us < min_us) min_us = us;
+            if (us > max_us) max_us = us;
+            fprintf(stderr, "[attn-event] %.3f us\n", us);
+        }
+        fprintf(stderr, "[attn-event-summary] count=%zu sum_us=%.1f avg_us=%.2f min_us=%.2f max_us=%.2f\n",
+                attn_events.size(), sum_us, sum_us / (double)attn_events.size(), min_us, max_us);
+        attn_events.clear();
+    }
+#endif
+
     void write_profiling_info() {
         FILE * fperf = fopen("cl_profiling.csv", "w");
         if (!fperf) {
@@ -678,6 +711,27 @@ struct ggml_backend_opencl_context {
 
         profiling_info.emplace_back();
         populateProfilingInfo(profiling_info.back(), evt, kernel, work_dim, global_work_size, local_work_size, tensor);
+#elif defined(GGML_OPENCL_ATTN_EVENT)
+        // Attention-only event dump (Phase B measurement patch).
+        // Collects CL profiling events for flash_attn decode kernels only;
+        // all other kernels run without event overhead (non-profile build perf).
+        GGML_UNUSED(tensor);
+        char kname[256];
+        size_t kname_len = 0;
+        clGetKernelInfo(kernel, CL_KERNEL_FUNCTION_NAME, sizeof(kname), kname, &kname_len);
+        const bool is_attn_q1 = (kname_len >= 8) &&
+            (strstr(kname, "flash_attn_") != NULL) &&
+            (strstr(kname, "_q1") != NULL);
+        if (is_attn_q1) {
+            cl_event evt;
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, &evt));
+            attn_events.push_back(evt);
+            if (attn_kernel_name.empty()) {
+                attn_kernel_name.assign(kname, kname_len > 0 ? kname_len - 1 : 0);
+            }
+        } else {
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL));
+        }
 #else
         GGML_UNUSED(tensor);
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL));
@@ -721,6 +775,9 @@ struct ggml_backend_opencl_context {
 #ifdef GGML_OPENCL_PROFILING
             write_profiling_info();
             profiling_info.clear();
+#endif
+#ifdef GGML_OPENCL_ATTN_EVENT
+            write_attn_event_dump();
 #endif
         }
     }
@@ -3013,7 +3070,7 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     //    (queue = clCreateCommandQueue(context, device, 0, &err), err)
     //)));
     cl_command_queue_properties command_queue_props = 0;
-#ifdef GGML_OPENCL_PROFILING
+#if defined(GGML_OPENCL_PROFILING) || defined(GGML_OPENCL_ATTN_EVENT)
     command_queue_props |= CL_QUEUE_PROFILING_ENABLE;
 #endif
     CL_CHECK((backend_ctx->queue = clCreateCommandQueue(context, device, command_queue_props, &err), err));

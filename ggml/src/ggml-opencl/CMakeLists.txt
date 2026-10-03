@@ -14,6 +14,11 @@ if (GGML_OPENCL_PROFILING)
     add_compile_definitions(GGML_OPENCL_PROFILING)
 endif ()
 
+if (GGML_OPENCL_ATTN_EVENT)
+    message(STATUS "OpenCL attention-only event dump enabled (Phase B)")
+    add_compile_definitions(GGML_OPENCL_ATTN_EVENT)
+endif ()
+
 add_compile_definitions(GGML_OPENCL_SOA_Q)
 add_compile_definitions(GGML_OPENCL_TARGET_VERSION=${GGML_OPENCL_TARGET_VERSION})
 
