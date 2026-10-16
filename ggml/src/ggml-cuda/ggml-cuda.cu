@@ -61,6 +61,7 @@
 #include "ggml-cuda/tri.cuh"
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
+#include "ggml-cuda/argus-dagger-cuda.h"
 #include "ggml.h"
 
 #include <algorithm>
@@ -2797,6 +2798,7 @@ static const char * ggml_backend_cuda_get_name(ggml_backend_t backend) {
 static void ggml_backend_cuda_free(ggml_backend_t backend) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
+    argus_dagger::finish();
     delete cuda_ctx;
     delete backend;
 }
@@ -3519,6 +3521,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
         }
     };
 
+    argus_dagger::begin_graph(cuda_ctx->stream(), cgraph, use_cuda_graph);
+
     while (!graph_evaluated_or_captured) {
         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
@@ -3634,6 +3638,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 if ((node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
                     continue;
                 }
+
+                argus_dagger::OpScope argus_op(node);
 
                 // start of fusion operations
                 static bool disable_fusion = (getenv("GGML_CUDA_DISABLE_FUSION") != nullptr);
