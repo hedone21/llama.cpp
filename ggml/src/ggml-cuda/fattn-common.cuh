@@ -6,6 +6,9 @@
 
 #include <cstdint>
 
+// argus-engine tickets/041 (defined in fattn.cu): when > 0, launch_fattn covers query heads [0, n) only.
+extern int ggml_cuda_argus_fa_heads;
+
 #define FATTN_KQ_STRIDE       256
 #define HALF_MAX_HALF         __float2half(65504.0f/2) // Use neg. of this instead of -INFINITY to initialize KQ max vals to avoid NaN upon subtraction.
 #define SOFTMAX_FTZ_THRESHOLD -20.0f                   // Softmax exp. of values smaller than this are flushed to zero to avoid NaNs.
@@ -892,7 +895,18 @@ void launch_fattn(
     const int ntiles_x     = ((Q->ne[1] + ncols1 - 1) / ncols1);
     const int gqa_ratio    = Q->ne[2] / K->ne[2];
     const int ntiles_z_gqa = ((gqa_ratio + ncols2 - 1) / ncols2);
-    const int ntiles_total = ntiles_x * ntiles_z_gqa * K->ne[2] * Q->ne[3];
+
+    // argus-engine tickets/041: the Doppeladler arm's GPU share covers query heads [0, n) only. The
+    // kernel keeps the graph's head count (it picks the KV head); only the grid's head axis shrinks,
+    // to the head groups of ncols2 heads that hold heads [0, n).
+    const int argus_heads = ggml_cuda_argus_fa_heads;
+    if (argus_heads > 0 && (stream_k || gqa_ratio % ncols2 != 0 || Q->ne[1] != 1 || Q->ne[3] != 1 || argus_heads > Q->ne[2])) {
+        GGML_ABORT("argus head split: stream_k=%d ncols1=%d ncols2=%d gqa=%d Q=[%d,%d,%d,%d] heads=%d",
+                   (int) stream_k, ncols1, ncols2, gqa_ratio, (int) Q->ne[0], (int) Q->ne[1], (int) Q->ne[2],
+                   (int) Q->ne[3], argus_heads);
+    }
+    const int argus_ztiles = (argus_heads + ncols2 - 1) / ncols2;
+    const int ntiles_total = argus_heads > 0 ? ntiles_x * argus_ztiles : ntiles_x * ntiles_z_gqa * K->ne[2] * Q->ne[3];
 
     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
@@ -967,7 +981,7 @@ void launch_fattn(
 
         blocks_num.x = ntiles_x;
         blocks_num.y = parallel_blocks;
-        blocks_num.z = ntiles_z_gqa*K->ne[2]*Q->ne[3];
+        blocks_num.z = argus_heads > 0 ? argus_ztiles : ntiles_z_gqa*K->ne[2]*Q->ne[3];
 
         if (parallel_blocks > 1) {
             dst_tmp.alloc(parallel_blocks*ggml_nelements(KQV));
@@ -1025,7 +1039,7 @@ void launch_fattn(
         }
     } else if (parallel_blocks > 1) {
         const dim3 block_dim_combine(DV, 1, 1);
-        const dim3 blocks_num_combine(Q->ne[1], Q->ne[2], Q->ne[3]);
+        const dim3 blocks_num_combine(Q->ne[1], argus_heads > 0 ? argus_heads : Q->ne[2], Q->ne[3]);
         const size_t nbytes_shared_combine = parallel_blocks*sizeof(float2);
 
         flash_attn_combine_results<DV>

@@ -6,6 +6,8 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+int ggml_cuda_argus_fa_heads = 0;
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;

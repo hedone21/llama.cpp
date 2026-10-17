@@ -62,6 +62,7 @@
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
 #include "ggml-cuda/argus-dagger-cuda.h"
+#include "ggml-cuda/argus-doppel-cuda.h"
 #include "ggml.h"
 
 #include <algorithm>
@@ -645,6 +646,7 @@ static void ggml_backend_cuda_buffer_memset_tensor(ggml_backend_buffer_t buffer,
 static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
+    argus_doppel_cuda::note_input(tensor, data, offset, size);
     ggml_cuda_set_device(ctx->device);
     CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
@@ -2799,6 +2801,7 @@ static void ggml_backend_cuda_free(ggml_backend_t backend) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
     argus_dagger::finish();
+    argus_doppel_cuda::finish();
     delete cuda_ctx;
     delete backend;
 }
@@ -2809,6 +2812,7 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
 
     GGML_ASSERT(buf->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && "unsupported buffer type");
 
+    argus_doppel_cuda::note_input(tensor, data, offset, size);
     CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cuda_ctx->stream()));
 }
 
@@ -3522,6 +3526,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
     };
 
     argus_dagger::begin_graph(cuda_ctx->stream(), cgraph, use_cuda_graph);
+    argus_doppel_cuda::begin_graph(*cuda_ctx, cgraph, use_cuda_graph);
 
     while (!graph_evaluated_or_captured) {
         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
@@ -3640,6 +3645,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 }
 
                 argus_dagger::OpScope argus_op(node);
+
+                if (const int argus_n = argus_doppel_cuda::dispatch(*cuda_ctx, cgraph, i)) {
+                    i += argus_n - 1;
+                    continue;
+                }
 
                 // start of fusion operations
                 static bool disable_fusion = (getenv("GGML_CUDA_DISABLE_FUSION") != nullptr);
@@ -4004,6 +4014,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     try_launch_concurrent_event(node);
                }
             }
+            argus_doppel_cuda::end_graph();
         }
 
 #ifdef USE_CUDA_GRAPH
@@ -5259,6 +5270,7 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
         GGML_LOG_ERROR("%s: failed to allocate context\n", __func__);
         return nullptr;
     }
+    argus_doppel_cuda::init_from_env();
 
     ggml_backend_t cuda_backend = new ggml_backend {
         /* .guid    = */ ggml_backend_cuda_guid(),
@@ -5271,3 +5283,20 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
+
+// argus-engine tickets/041: Doppeladler glue entry points that need this file's static functions.
+namespace argus_doppel_cuda {
+
+bool gpu_can_fuse(const ggml_cgraph * graph, int i, std::initializer_list<ggml_op> ops) {
+    return ggml_cuda_can_fuse(graph, i, ops, {});
+}
+
+bool gpu_should_fuse_mmvf(const ggml_tensor * mul_mat) {
+    return ggml_cuda_should_fuse_mul_mat_vec_f(mul_mat);
+}
+
+bool gpu_forward(ggml_backend_cuda_context & ctx, ggml_tensor * node) {
+    return ggml_cuda_compute_forward(ctx, node);
+}
+
+} // namespace argus_doppel_cuda
