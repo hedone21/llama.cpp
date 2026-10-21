@@ -478,6 +478,32 @@ static void rope_neox_matches_reference() {
     }
 }
 
+// Llama (moai ap-oz94): pairs (2i, 2i + 1), same angle as rope_neox.
+static void rope_norm_matches_reference() {
+    std::mt19937 rng(12);
+    const int    hd = 128, n_dims = 128;
+    const float  base = 500000.0f;
+    for (int pos : {0, 1, 1000, 16383}) {
+        std::vector<float> x = rand_f32(rng, (size_t) N_HEADS * hd, 1.0f);
+        std::vector<float> y = x;
+        rope_norm(y.data(), 3, 9, hd, n_dims, (double) pos, base);
+        double err = 0;
+        for (int h = 0; h < N_HEADS; h++) {
+            for (int i = 0; i < hd / 2; i++) {
+                const float * v  = x.data() + (size_t) h * hd;
+                std::complex<double> z(v[2 * i], v[2 * i + 1]);
+                if (h >= 3 && h < 9) {
+                    float th = (float) pos * std::pow(base, (-1.0f / (float) n_dims) * (float) (2 * i));
+                    z *= std::polar(1.0, (double) th);
+                }
+                const float * w = y.data() + (size_t) h * hd;
+                err = std::max(err, std::abs(z - std::complex<double>(w[2 * i], w[2 * i + 1])));
+            }
+        }
+        CHECK(err <= 1e-5);
+    }
+}
+
 static void pool_runs_every_task_once() {
     Pool pool(6);
     for (int round = 0; round < 2000; round++) {
@@ -539,6 +565,7 @@ int main() {
         {"colslice_gemv_matches_dense", [] { colslice_gemv_matches_dense(pool4); }},
         {"attn_group_split_matches_full", [] { attn_group_split_matches_full(pool4); }},
         {"rope_neox_matches_reference", rope_neox_matches_reference},
+        {"rope_norm_matches_reference", rope_norm_matches_reference},
         {"pool_runs_every_task_once", pool_runs_every_task_once},
         {"pool_set_active_limits_threads", pool_set_active_limits_threads},
     };

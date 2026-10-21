@@ -178,6 +178,8 @@ struct State {
     // model geometry (from the first decode graph)
     int    n_layers = 0, n_head = 0, n_kv = 0, hd = 0, dim = 0, ffn = 0, n_dims = 0;
     float  freq_base = 0.0f, scale = 0.0f;
+    bool   has_bias  = true;  // Q/K/V bias ADDs (Qwen2); Llama has none (moai ap-oz94)
+    bool   rope_neox = true;  // RoPE mode: NeoX (Qwen2) or normal (Llama)
     size_t kv_cap = 0;
 
     // current graph
@@ -421,15 +423,21 @@ static void build_map(ggml_cgraph * g) {
     if (S->layers.empty()) {
         fatal("decode graph without layers (no attn_norm / matmul nodes found)");
     }
+    // Q/K/V bias: every layer has all three (Qwen2) or none (Llama).
+    S->has_bias = S->layers[0].add_q != nullptr;
     for (size_t l = 0; l < S->layers.size(); l++) {
         const LayerNodes & L = S->layers[l];
-        const ggml_tensor * need[] = {L.attn_norm, L.mm_q, L.add_q, L.rope_q, L.mm_k, L.add_k, L.rope_k,
-                                      L.mm_v, L.add_v, L.set_k, L.set_v, L.fa, L.mm_wo, L.ffn_inp,
+        const ggml_tensor * need[] = {L.attn_norm, L.mm_q, L.rope_q, L.mm_k, L.rope_k,
+                                      L.mm_v, L.set_k, L.set_v, L.fa, L.mm_wo, L.ffn_inp,
                                       L.ffn_norm, L.mm_gate, L.mm_up, L.glu, L.mm_down, L.l_out};
         for (const ggml_tensor * t : need) {
             if (!t) {
-                fatal("layer " + std::to_string(l) + ": graph does not have the Qwen2 decode layer shape");
+                fatal("layer " + std::to_string(l) + ": graph does not have the Qwen2/Llama decode layer shape");
             }
+        }
+        const bool b = L.add_q != nullptr;
+        if ((L.add_k != nullptr) != b || (L.add_v != nullptr) != b || b != S->has_bias) {
+            fatal("layer " + std::to_string(l) + ": Q/K/V bias on some projections or layers only");
         }
         if (!L.glu->src[1]) {
             fatal("fused gate/up GLU (single source) is not supported");
@@ -440,7 +448,7 @@ static void build_map(ggml_cgraph * g) {
         const std::pair<ggml_tensor *, Role> rs[] = {
             {L.attn_norm->src[0], Role::RmsAttn}, {L.ffn_norm->src[0], Role::RmsFfn},
             {L.attn_norm, Role::AttnNorm},        {L.ffn_norm, Role::FfnNorm},
-            {L.mm_q, Role::MmQ},                  {L.add_q, Role::AddQ},
+            {L.mm_q, Role::MmQ},
             {L.rope_q, Role::RopeQ},              {L.fa, Role::Fa},
             {L.mm_wo, Role::MmWo},                {L.ffn_inp, Role::FfnInp},
             {L.mm_gate, Role::MmGate},            {L.mm_up, Role::MmUp},
@@ -449,6 +457,9 @@ static void build_map(ggml_cgraph * g) {
         };
         for (const auto & r : rs) {
             S->roles[r.first] = {(int) l, r.second};
+        }
+        if (L.add_q) {
+            S->roles[L.add_q] = {(int) l, Role::AddQ};
         }
     }
 }
@@ -523,9 +534,11 @@ static void map_weights() {
         w.wg = (const uint16_t *) host(L.mm_gate->src[0], GGML_TYPE_F16);
         w.wu = (const uint16_t *) host(L.mm_up->src[0], GGML_TYPE_F16);
         w.wd = (const uint16_t *) host(L.mm_down->src[0], GGML_TYPE_F16);
-        w.bq = (const float *) host(L.add_q->src[1], GGML_TYPE_F32);
-        w.bk = (const float *) host(L.add_k->src[1], GGML_TYPE_F32);
-        w.bv = (const float *) host(L.add_v->src[1], GGML_TYPE_F32);
+        if (S->has_bias) {
+            w.bq = (const float *) host(L.add_q->src[1], GGML_TYPE_F32);
+            w.bk = (const float *) host(L.add_k->src[1], GGML_TYPE_F32);
+            w.bv = (const float *) host(L.add_v->src[1], GGML_TYPE_F32);
+        }
     }
     gguf_free(gc);
     // † D2: the file must hold the weights the GPU runs (not just the same names and shapes).
@@ -564,9 +577,10 @@ static void install() {
     memcpy(&af, rp + 8, 4);
     S->n_dims    = rp[1];
     S->freq_base = fb;
-    if (rp[2] != GGML_ROPE_TYPE_NEOX || S->n_dims != S->hd || fs != 1.0f || ef != 0.0f || af != 1.0f ||
-        L0.rope_q->src[2] != nullptr) {
-        fatal("unsupported RoPE (need NeoX, n_dims = head_dim, no scaling, no freq factors)");
+    S->rope_neox = rp[2] == GGML_ROPE_TYPE_NEOX;
+    if ((rp[2] != GGML_ROPE_TYPE_NEOX && rp[2] != GGML_ROPE_TYPE_NORMAL) || S->n_dims != S->hd || fs != 1.0f ||
+        ef != 0.0f || af != 1.0f || L0.rope_q->src[2] != nullptr) {
+        fatal("unsupported RoPE (need NeoX or normal, n_dims = head_dim, no scaling, no freq factors)");
     }
     const float * fp = (const float *) L0.fa->op_params;
     S->scale         = fp[0];
@@ -621,9 +635,9 @@ static void install() {
     S->installed = true;
     fprintf(stderr,
             "[DOPPEL] start backend=cuda layers=%d r0=%.3f adaptive=%d threads=%d flags=%d heads=%d/%d hd=%d dim=%d "
-            "ffn=%d kv_cap=%zu gguf=%s\n",
+            "ffn=%d kv_cap=%zu bias=%d rope=%s gguf=%s\n",
             S->n_layers, S->r0, S->adaptive ? 1 : 0, S->threads, S->flags ? 1 : 0, S->n_head, S->n_kv, S->hd,
-            S->dim, S->ffn, S->kv_cap, S->gguf_path.c_str());
+            S->dim, S->ffn, S->kv_cap, S->has_bias ? 1 : 0, S->rope_neox ? "neox" : "normal", S->gguf_path.c_str());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -872,6 +886,16 @@ static void mm_rows_bias(ggml_tensor * mm, ggml_tensor * add, int rows) {
     ggml_cuda_mul_mat_vec_f(*S->ctx, &s0, mm->src[1], nullptr, &dst, &fusion);
 }
 
+// Rows [0, rows) of a MUL_MAT without a bias (Llama Q): the loop's plain mul_mat_vec_f.
+static void mm_rows(ggml_tensor * mm, int rows) {
+    ggml_tensor s0  = *mm->src[0];
+    ggml_tensor dst = *mm;
+    s0.ne[1]        = rows;
+    dst.ne[0]       = rows;
+    check_mmvf(&s0, mm->src[1]);
+    ggml_cuda_mul_mat_vec_f(*S->ctx, &s0, mm->src[1], nullptr, &dst, nullptr);
+}
+
 // Columns [0, cols) of a MUL_MAT: a partial sum of every row. With `add` (the next node, a
 // residual ADD), the residual goes in as the fused bias and the sum lands in `add`.
 static void mm_cols(ggml_tensor * mm, ggml_tensor * add, int cols) {
@@ -956,15 +980,18 @@ static void cpu_attn(int l, int h_g) {
         {w.wv, (size_t) dim, S->v.data(), kvr},
     };
     gemv_f16_multi(*S->pool, S->x.data(), dim, jobs, 3);
-    for (int i = q_lo; i < dim; i++) {
-        S->q[(size_t) i] += w.bq[i];
+    if (S->has_bias) {
+        for (int i = q_lo; i < dim; i++) {
+            S->q[(size_t) i] += w.bq[i];
+        }
+        for (int i = 0; i < kvr; i++) {
+            S->k[(size_t) i] += w.bk[i];
+            S->v[(size_t) i] += w.bv[i];
+        }
     }
-    for (int i = 0; i < kvr; i++) {
-        S->k[(size_t) i] += w.bk[i];
-        S->v[(size_t) i] += w.bv[i];
-    }
-    rope_neox(S->q.data(), h_g, S->n_head, hd, S->n_dims, (double) S->pos, S->freq_base);
-    rope_neox(S->k.data(), 0, S->n_kv, hd, S->n_dims, (double) S->pos, S->freq_base);
+    auto rope = S->rope_neox ? rope_neox : rope_norm;
+    rope(S->q.data(), h_g, S->n_head, hd, S->n_dims, (double) S->pos, S->freq_base);
+    rope(S->k.data(), 0, S->n_kv, hd, S->n_dims, (double) S->pos, S->freq_base);
     HostKv & kv = S->kv[(size_t) l];
     for (int kvh = 0; kvh < S->n_kv; kvh++) {
         uint16_t * kd = kv.k.get() + ((size_t) kvh * S->kv_cap + S->slot) * hd;
@@ -1075,6 +1102,13 @@ int dispatch(ggml_backend_cuda_context & ctx, ggml_cgraph * g, int i) {
             return 2;
         }
         case Role::MmQ:
+            if (!L.add_q) {
+                if (fuses_with_add(g, i)) {
+                    unexpected(node, "the loop would fuse the bias-free Q with an ADD");
+                }
+                mm_rows(node, heads_gpu(l) * S->hd);
+                return 1;
+            }
             if (node_at(g, i + 1) != L.add_q || !fuses_with_add(g, i)) {
                 unexpected(node, "the loop would not fuse it with the Q bias");
             }

@@ -251,6 +251,10 @@ void gemv_f16_multi(Pool & pool, const float * x, int k, const GemvJob * jobs, i
 // theta_i = pos * freq_base^(-2i/n_dims).
 void rope_neox(float * x, int h0, int h1, int hd, int n_dims, double pos, float freq_base);
 
+// Normal (GPT-J pair) RoPE of heads [h0, h1): pairs (2i, 2i + 1), the same theta as rope_neox
+// (Llama; argus-paper moai ap-oz94).
+void rope_norm(float * x, int h0, int h1, int hd, int n_dims, double pos, float freq_base);
+
 // out[i] = silu(g[i]) * u[i]
 void silu_mul(const float * g, const float * u, float * out, int n);
 

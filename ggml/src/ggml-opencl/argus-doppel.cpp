@@ -676,6 +676,29 @@ void rope_neox(float * x, int h0, int h1, int hd, int n_dims, double pos, float 
     }
 }
 
+void rope_norm(float * x, int h0, int h1, int hd, int n_dims, double pos, float freq_base) {
+    // Same theta as rope_neox; the pair is (i0, i0 + 1) as in the CUDA rope_norm kernel.
+    const int   half       = n_dims / 2;
+    const float inv_ndims  = -1.0f / (float) n_dims;
+    const float theta_base = (float) pos;
+    std::vector<float> c((size_t) half), s((size_t) half);
+    for (int ic = 0; ic < half; ic++) {
+        const int   i0    = 2 * ic;
+        const float theta = theta_base * std::pow(freq_base, inv_ndims * (float) i0);
+        c[(size_t) ic]    = std::cos(theta);
+        s[(size_t) ic]    = std::sin(theta);
+    }
+    for (int h = h0; h < h1; h++) {
+        float * v = x + (size_t) h * hd;
+        for (int ic = 0; ic < half; ic++) {
+            const float x0 = v[2 * ic];
+            const float x1 = v[2 * ic + 1];
+            v[2 * ic]      = x0 * c[(size_t) ic] - x1 * s[(size_t) ic];
+            v[2 * ic + 1]  = x0 * s[(size_t) ic] + x1 * c[(size_t) ic];
+        }
+    }
+}
+
 void silu_mul(const float * g, const float * u, float * out, int n) {
     for (int i = 0; i < n; i++) {
         out[i] = g[i] / (1.0f + std::exp(-g[i])) * u[i];
