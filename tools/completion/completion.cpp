@@ -613,7 +613,10 @@ int main(int argc, char ** argv) {
                 // - take the n_keep first tokens from the original prompt (via n_past)
                 // - take half of the last (n_ctx - n_keep) tokens and recompute the logits in batches
 
-                if (n_past + (int) embd.size() >= n_ctx) {
+                // ARGUS H2O arm: eviction keeps the KV cells under ARGUS_H2O_BUDGET * tokens seen, so the cell
+                // count, not n_past, bounds the cache. Positions may pass n_ctx; keep generating.
+                static const bool argus_h2o = getenv("ARGUS_H2O_BUDGET") && atof(getenv("ARGUS_H2O_BUDGET")) > 0.0;
+                if (n_past + (int) embd.size() >= n_ctx && !argus_h2o) {
                     if (!params.ctx_shift){
                         LOG_WRN("\n\n%s: context full and context shift is disabled => stopping\n", __func__);
                         break;
