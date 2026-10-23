@@ -202,6 +202,7 @@ public:
     // ARGUS H2O comparison arm (see argus-h2o.h); single stream only
     void h2o_accumulate(const float * score, uint32_t n, uint32_t n_tokens);
     void h2o_evict(float budget);
+    void h2o_compact();
 
 private:
     std::vector<float> h2o_score; // accumulated attention mass per KV cell

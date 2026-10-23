@@ -286,11 +286,69 @@ void llama_kv_cache::h2o_evict(float budget) {
         }
     }
 
+    // a bulk eviction (e.g. right after a long prefill) leaves survivors at high indices, and attention
+    // still spans up to the last one. Pack the cells once the gap exceeds one padding step.
+    if (cells.used_max_p1() > cells.get_used() + 256) {
+        h2o_compact();
+    }
+
     if (h2o_seen >= h2o_next_log) {
         LLAMA_LOG_INFO("[h2o] seen=%llu resident=%u cap=%u used_max_p1=%u evicted=%llu\n",
                 (unsigned long long) h2o_seen, cells.get_used(), cap, cells.used_max_p1(), (unsigned long long) h2o_evicted);
         h2o_next_log = (h2o_seen/256 + 1)*256;
     }
+}
+
+void llama_kv_cache::h2o_compact() {
+    GGML_ASSERT(n_stream == 1);
+    GGML_ASSERT(!v_trans && "H2O compaction expects the flash-attention V layout");
+
+    const int64_t t_start_us = ggml_time_us();
+
+    auto & cells = v_cells[0];
+    const uint32_t n_src = cells.used_max_p1();
+
+    // src index of each packed cell, in index order
+    std::vector<uint32_t> src;
+    src.reserve(cells.get_used());
+    for (uint32_t i = 0; i < n_src; ++i) {
+        if (!cells.is_empty(i)) {
+            src.push_back(i);
+        }
+    }
+
+    std::vector<uint8_t> buf;
+    for (const auto & layer : layers) {
+        for (ggml_tensor * t : { layer.k, layer.v }) {
+            if (t == nullptr) {
+                continue;
+            }
+            const size_t row = t->nb[1];
+            buf.resize(n_src*row);
+            ggml_backend_tensor_get(t, buf.data(), 0, n_src*row);
+            for (uint32_t j = 0; j < src.size(); ++j) {
+                if (src[j] != j) {
+                    memcpy(buf.data() + j*row, buf.data() + src[j]*row, row);
+                }
+            }
+            ggml_backend_tensor_set(t, buf.data(), 0, src.size()*row);
+        }
+    }
+
+    uint32_t moved = 0;
+    for (uint32_t j = 0; j < src.size(); ++j) {
+        if (src[j] != j) {
+            cells.mv(src[j], j);
+            h2o_score[j] = h2o_score[src[j]];
+            h2o_score[src[j]] = 0.0f;
+            moved++;
+        }
+    }
+    v_heads[0] = src.size();
+
+    LLAMA_LOG_INFO("[h2o] compact seen=%llu resident=%zu used_max_p1 %u -> %u moved=%u ms=%.1f\n",
+            (unsigned long long) h2o_seen, src.size(), n_src, cells.used_max_p1(), moved,
+            (ggml_time_us() - t_start_us)/1000.0);
 }
 
 bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
