@@ -8,6 +8,8 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
+#include "llama-kv-cache.h"
+#include "argus-h2o.h"
 
 #include <cinttypes>
 #include <cmath>
@@ -1805,8 +1807,27 @@ int llama_context::decode(const llama_batch & batch_inp) {
             copy_tensor_async_candidates(res->t_candidates,     sampling.candidates, stride, sampling.candidates_count, seq_to_output_row, sched.get());
         }
 
+        // ARGUS H2O: add this ubatch's attention mass to the per-cell scores
+        if (res->t_h2o_score) {
+            if (auto * kv = dynamic_cast<llama_kv_cache *>(memory.get())) {
+                ggml_tensor * t = res->t_h2o_score;
+                std::vector<float> score(ggml_nelements(t));
+                ggml_backend_t backend_h2o = ggml_backend_sched_get_tensor_backend(sched.get(), t);
+                ggml_backend_tensor_get_async(backend_h2o, t, score.data(), 0, ggml_nbytes(t));
+                ggml_backend_sched_synchronize(sched.get());
+                kv->h2o_accumulate(score.data(), score.size(), ubatch.n_tokens);
+            }
+        }
+
         n_outputs_prev += n_outputs;
     } while (mctx->next());
+
+    // ARGUS H2O: evict once the whole batch is in the cache
+    if (argus_h2o_budget() > 0.0f) {
+        if (auto * kv = dynamic_cast<llama_kv_cache *>(memory.get())) {
+            kv->h2o_evict(argus_h2o_budget());
+        }
+    }
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;

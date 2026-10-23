@@ -1,5 +1,7 @@
 #include "llama-graph.h"
 
+#include "argus-h2o.h"
+
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
@@ -737,6 +739,7 @@ void llm_graph_result::reset() {
     t_logits      = nullptr;
     t_embd        = nullptr;
     t_embd_pooled = nullptr;
+    t_h2o_score   = nullptr;
     t_sampled.clear();
     t_sampled_probs.clear();
     t_sampled_logits.clear();
@@ -1801,6 +1804,23 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
 
     ggml_tensor * cur;
+
+    // ARGUS H2O: a separate softmax(QK^T) pass, since flash attention does not expose the probabilities.
+    // Column sums over queries and heads give each KV cell's attention mass; layers add into one tensor.
+    if (argus_h2o_budget() > 0.0f && kq_mask && n_stream == 1) {
+        ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
+
+        ggml_tensor * s = ggml_reshape_2d(ctx0, kq, kq->ne[0], kq->ne[1]*kq->ne[2]*kq->ne[3]);
+        s = ggml_sum_rows(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, s)));
+        s = ggml_reshape_1d(ctx0, s, kq->ne[0]);
+        cb(s, "h2o_score", il);
+
+        res->t_h2o_score = res->t_h2o_score ? ggml_add(ctx0, res->t_h2o_score, s) : s;
+        ggml_set_output(res->t_h2o_score);
+        ggml_build_forward_expand(gf, res->t_h2o_score);
+    }
 
     const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
     if (use_flash_attn) {

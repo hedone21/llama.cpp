@@ -219,10 +219,77 @@ void llama_kv_cache::clear(bool data) {
         v_heads[s] = 0;
     }
 
+    h2o_score.clear();
+    h2o_seen     = 0;
+    h2o_evicted  = 0;
+    h2o_next_log = 0;
+
     if (data) {
         for (auto & [_, buf] : ctxs_bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
         }
+    }
+}
+
+void llama_kv_cache::h2o_accumulate(const float * score, uint32_t n, uint32_t n_tokens) {
+    GGML_ASSERT(n_stream == 1);
+
+    const auto & cells = v_cells[0];
+
+    if (h2o_score.size() != cells.size()) {
+        h2o_score.assign(cells.size(), 0.0f);
+    }
+
+    n = std::min<uint32_t>(n, cells.size());
+    for (uint32_t i = 0; i < n; ++i) {
+        h2o_score[i] += score[i];
+    }
+
+    h2o_seen += n_tokens;
+}
+
+void llama_kv_cache::h2o_evict(float budget) {
+    GGML_ASSERT(n_stream == 1);
+
+    auto & cells = v_cells[0];
+    auto & head  = v_heads[0];
+
+    const uint32_t cap = std::max<uint32_t>(2, (uint32_t) std::ceil(budget * (double) h2o_seen));
+
+    if (cells.get_used() > cap) {
+        std::vector<uint32_t> idx;
+        idx.reserve(cells.get_used());
+        for (uint32_t i = 0; i < cells.size(); ++i) {
+            if (!cells.is_empty(i)) {
+                idx.push_back(i);
+            }
+        }
+
+        // H2O: half of the budget is the recent window, the other half the heavy hitters
+        const uint32_t n_recent = cap / 2;
+        const uint32_t n_heavy  = cap - n_recent;
+
+        std::sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b) { return cells.pos_get(a) > cells.pos_get(b); });
+        std::sort(idx.begin() + n_recent, idx.end(), [&](uint32_t a, uint32_t b) { return h2o_score[a] > h2o_score[b]; });
+
+        uint32_t new_head = cells.size();
+        for (size_t j = n_recent + n_heavy; j < idx.size(); ++j) {
+            const uint32_t i = idx[j];
+            cells.rm(i);
+            h2o_score[i] = 0.0f;
+            new_head = std::min(new_head, i);
+            h2o_evicted++;
+        }
+
+        if (new_head < head) {
+            head = new_head;
+        }
+    }
+
+    if (h2o_seen >= h2o_next_log) {
+        LLAMA_LOG_INFO("[h2o] seen=%llu resident=%u cap=%u used_max_p1=%u evicted=%llu\n",
+                (unsigned long long) h2o_seen, cells.get_used(), cap, cells.used_max_p1(), (unsigned long long) h2o_evicted);
+        h2o_next_log = (h2o_seen/256 + 1)*256;
     }
 }
 

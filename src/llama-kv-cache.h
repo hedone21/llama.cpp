@@ -199,7 +199,16 @@ public:
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
+    // ARGUS H2O comparison arm (see argus-h2o.h); single stream only
+    void h2o_accumulate(const float * score, uint32_t n, uint32_t n_tokens);
+    void h2o_evict(float budget);
+
 private:
+    std::vector<float> h2o_score; // accumulated attention mass per KV cell
+    uint64_t h2o_seen     = 0;    // tokens processed, the budget's denominator
+    uint64_t h2o_evicted  = 0;
+    uint64_t h2o_next_log = 0;
+
     const llama_model & model;
     const llama_hparams & hparams;
 
